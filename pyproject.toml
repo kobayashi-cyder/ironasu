@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ironasu"
-version = "0.2.0"
+version = "0.3.0"
 description = "Durable, permission-gated local AI coding harness"
 requires-python = ">=3.10"
 dependencies = []
 
 [project.scripts]
 ironasu = "ironasu.harness:main"
+ironasu-orchestrate = "ironasu.orchestrator:main"
 
 [tool.setuptools.packages.find]
 include = ["ironasu*"]

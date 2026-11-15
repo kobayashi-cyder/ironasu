@@ -1,0 +1,24 @@
+[
+  {
+    "id": "inspect-code",
+    "role": "investigator",
+    "prompt": "Inspect the codebase and report architectural risks without editing files.",
+    "priority": 5,
+    "idempotency_key": "sample-inspection-v1"
+  },
+  {
+    "id": "inspect-tests",
+    "role": "test-analyst",
+    "prompt": "Inspect existing tests and identify coverage gaps without changing files.",
+    "priority": 5,
+    "idempotency_key": "sample-test-review-v1"
+  },
+  {
+    "id": "integration-review",
+    "role": "reviewer",
+    "prompt": "Review the code and test findings, then propose the next safe implementation steps.",
+    "depends_on": ["inspect-code", "inspect-tests"],
+    "priority": 2,
+    "idempotency_key": "sample-integration-v1"
+  }
+]
