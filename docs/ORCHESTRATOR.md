@@ -5,7 +5,7 @@ This is an **experimental local coding-agent orchestration layer**, not a hosted
 ## Capabilities
 
 - Up to **16 logical workers by default** (1–128 configured at first workspace initialization). Each worker is a distinct Harness session executing one DAG task at a time.
-- Separate, **process-local** model request gate (`--inference 2`) and tool execution gate (`--tools 4`). A worker waiting for a tool does not hold a model permit; tasks can overlap without forcing 16 simultaneous LLM inference requests.
+- Separate, **process-local** model request gate (`--inference 2`) and tool execution gate (`--tools 4`), plus a **single-workspace writer/check lock** to avoid lost updates between workers in one runner process. A worker waiting for a tool does not hold a model permit; tasks can overlap without forcing 16 simultaneous LLM inference requests.
 - SQLite WAL-backed task dependencies, atomic claims, priority aging (1 point/minute), submission idempotency keys, per-task lease tokens, heartbeats, and task results.
 - Durable append-only shared event log (`topic`, <=400-character summary, optional original body + SHA-256), worker-specific incremental cursors, operator-readable event details, and short operator-maintained global brief.
 - Completion and failure/uncertainty events automatically published. Event cursors are advanced **only** after a successful task which was actually started with those events in its prompt. For a resumed v0.2 Harness session, no fresh-event acknowledgement is claimed.
@@ -92,7 +92,7 @@ If the interrupted Harness session contains an uncertain tool call, use the exis
 
 ## Operational boundaries
 
-- **One orchestrator `run` process per model backend.** SQLite prevents duplicate task claims across processes, but the inference and tool semaphores are **process-local**; multiple independent runners can exceed the configured aggregate inference/tool limits. No cross-process GPU scheduler yet.
+- **One orchestrator `run` process per model backend and workspace.** SQLite prevents duplicate task claims across processes, but inference, tool and workspace-write locks are **process-local**; multiple independent runners can exceed configured limits and race on file edits. No cross-process GPU scheduler/locking yet.
 - This is a **run-until-idle CLI**, not a long-lived daemon, cron service, browser automation, MCP server, or sandbox.
 - Up to 16 workers means 16 task/session slots, not 16 always-active GPU streams. Peak memory and throughput depend on the upstream server and hardware and must be benchmarked.
 - SQLite WAL allows concurrent readers but one writer at a time. Task state and logs may grow indefinitely; no rotation, snapshotting, vacuum policy, or retention enforcement yet.
