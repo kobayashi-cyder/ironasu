@@ -387,7 +387,8 @@ def context_window(history: list[dict[str, Any]], max_chars: int) -> list[dict[s
 
 
 class Harness:
-    def __init__(self, settings: Settings, backend: Any = None):
+    def __init__(self, settings: Settings, backend: Any = None, tool_gate: Any = None):
+        self.tool_gate = tool_gate
         self.settings = settings
         self.backend = backend if backend is not None else OpenAIBackend(settings)
         self.store = Store(settings.workspace)
@@ -429,7 +430,11 @@ class Harness:
                 self.store.start(sid, call)
                 try:
                     args = json.loads(call["function"].get("arguments") or "{}")
-                    output = tools.execute(call["function"]["name"], args)
+                    if self.tool_gate is None:
+                        output = tools.execute(call["function"]["name"], args)
+                    else:
+                        with self.tool_gate:
+                            output = tools.execute(call["function"]["name"], args)
                 except (ValueError, KeyError, TypeError) as exc:
                     output = f"TOOL_ERROR {exc}"
                 self.store.finish(sid, self.settings.workspace, call, _clip(output))
