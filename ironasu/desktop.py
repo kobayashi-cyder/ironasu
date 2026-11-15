@@ -471,10 +471,10 @@ class DesktopWindow:
         self._label(header, "コーパス並列エージェント", size=15, bold=True).pack(side="left")
         self._label(header, "最大16ワーカー · モデル同時処理は独立制限",
                     color=MUTED, size=9).pack(side="right")
-        options = self._section(page, "01  タスクとコーパスの設定")
+        options = tk.Frame(page, bg=SURFACE, padx=13, pady=12)
         options.grid(row=1, column=0, sticky="ew", pady=(0, 9))
         options.grid_columnconfigure(0, weight=1)
-        self._label(options, "分析指示（全エージェント共通）", color=MUTED,
+        self._label(options, "01  タスクとコーパスの設定  ·  分析指示", color=MINT,
                     bg=SURFACE, size=9).grid(row=0, column=0, sticky="w")
         self.agent_objective = tk.Text(
             options, height=2, wrap="word", fg=FOREGROUND, bg=SURFACE_ALT,
