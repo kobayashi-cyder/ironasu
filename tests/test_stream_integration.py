@@ -113,8 +113,11 @@ class RealTransformersTests(unittest.TestCase):
                     def decode(self, token_ids, skip_special_tokens):
                         return ",".join(str(int(t)) for t in token_ids)
 
-                generated = PagedCausalLM(empty, FixedTokenizer(), pager).generate(
+                paged_engine = PagedCausalLM(empty, FixedTokenizer(), pager)
+                generated = paged_engine.generate(
                     "fixed input", max_new_tokens=2, speculative_ngram=True)
+                self.assertEqual(paged_engine.last_output_token_count, 2)
+                self.assertIsNotNone(paged_engine.last_speculative_cache_metrics)
                 expected = ",".join(str(int(t)) for t in
                                     normal_tokens[0, ids.shape[1]:ids.shape[1] + 2])
                 self.assertEqual(generated, expected)
