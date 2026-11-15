@@ -5,6 +5,7 @@ This is a local-process harness, not an OS sandbox or a hosted always-on agent.
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -123,6 +124,17 @@ class Store:
             session_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
             PRIMARY KEY(session_id, key))""")
         self.conn.commit()
+
+    def close(self) -> None:
+        self.conn.close()
+
+    def __del__(self) -> None:
+        connection = getattr(self, "conn", None)
+        if connection is not None:
+            try:
+                connection.close()
+            except sqlite3.Error:
+                pass
 
     def load(self, sid: str) -> dict[str, Any] | None:
         row = self.conn.execute("SELECT workspace,status,messages,pending FROM sessions WHERE id=?", (sid,)).fetchone()
@@ -387,8 +399,10 @@ def context_window(history: list[dict[str, Any]], max_chars: int) -> list[dict[s
 
 
 class Harness:
-    def __init__(self, settings: Settings, backend: Any = None, tool_gate: Any = None):
+    def __init__(self, settings: Settings, backend: Any = None, tool_gate: Any = None,
+                 workspace_gate: Any = None):
         self.tool_gate = tool_gate
+        self.workspace_gate = workspace_gate
         self.settings = settings
         self.backend = backend if backend is not None else OpenAIBackend(settings)
         self.store = Store(settings.workspace)
@@ -430,11 +444,13 @@ class Harness:
                 self.store.start(sid, call)
                 try:
                     args = json.loads(call["function"].get("arguments") or "{}")
-                    if self.tool_gate is None:
-                        output = tools.execute(call["function"]["name"], args)
-                    else:
-                        with self.tool_gate:
-                            output = tools.execute(call["function"]["name"], args)
+                    name = call["function"]["name"]
+                    # Lock ordering is fixed: global tool budget -> workspace mutations/checks.
+                    workspace_lock = (self.workspace_gate if name in
+                                      ("write_file", "edit_file", "run_checks") else None)
+                    with (self.tool_gate or nullcontext()):
+                        with (workspace_lock or nullcontext()):
+                            output = tools.execute(name, args)
                 except (ValueError, KeyError, TypeError) as exc:
                     output = f"TOOL_ERROR {exc}"
                 self.store.finish(sid, self.settings.workspace, call, _clip(output))
