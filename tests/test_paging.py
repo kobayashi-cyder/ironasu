@@ -105,6 +105,22 @@ class StreamingTests(unittest.TestCase):
         with self.assertRaises(PagingError):
             decoder_stage_names(nn.Linear(2, 3))
 
+    def test_adaptive_prefetch_matches_normal_forward(self):
+        with LayerPager(self.meta, self.index, prefetch=True, prefetch_mode="adaptive") as pager:
+            for _ in range(3):
+                with pager.session() as model:
+                    actual = model(self.ids)
+                torch.testing.assert_close(actual, self.source(self.ids), rtol=0, atol=0)
+            metrics = pager.snapshot()["prefetch_scheduler"]
+            self.assertEqual(metrics["mode"], "adaptive")
+            self.assertGreater(metrics["submitted"], 0)
+            self.assertGreater(metrics["used"], 0)
+            self.assertEqual(pager.snapshot()["resident_stage_count"], 0)
+        with self.assertRaises(PagingError):
+            LayerPager(self.meta, self.index, prefetch=False, prefetch_mode="adaptive")
+        with self.assertRaises(PagingError):
+            LayerPager(self.meta, self.index, prefetch_mode="unknown")
+
     def test_prefetch_matches_normal_forward(self):
         with LayerPager(self.meta, self.index, prefetch=True) as pager:
             for _ in range(2):
