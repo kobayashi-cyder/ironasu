@@ -364,7 +364,8 @@ class LayerPager:
         started = perf_counter()
         new_data = self.index.read(missing)
         elapsed = perf_counter() - started
-        size_bytes = sum(t.numel() * t.element_size() for t in new_data.values())
+        from .q4 import _bytes
+        size_bytes = sum(_bytes(t) for t in new_data.values())
         tensors = {**cached, **new_data}
         # Verify all aliases before exposing any newly read tensor to the cache.
         if any(tuple(tensors[slot.checkpoint_name].shape) != slot.shape
@@ -376,7 +377,7 @@ class LayerPager:
             for key, tensor in new_data.items():
                 if key not in self._selected_tensor_names or key in self._cpu_cache:
                     continue
-                actual_bytes = tensor.numel() * tensor.element_size()
+                actual_bytes = _bytes(tensor)
                 if self._cpu_cache_bytes + actual_bytes <= self._cpu_cache_budget:
                     self._cpu_cache[key] = tensor
                     self._cpu_cache_bytes += actual_bytes

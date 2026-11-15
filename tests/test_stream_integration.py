@@ -11,6 +11,7 @@ except ImportError:
     HAVE_DEPS = False
 
 from ironasu.paging import LayerPager, SafetensorsIndex
+from ironasu.q4 import Q4Index, quantize_checkpoint
 
 
 @unittest.skipUnless(HAVE_DEPS, "optional transformers/accelerate dependencies are not installed")
@@ -80,6 +81,44 @@ class RealTransformersTests(unittest.TestCase):
                 torch.testing.assert_close(normal_tokens, streamed_tokens, rtol=0, atol=0)
                 self.assertGreater(pager.snapshot()["cpu_cache"]["hits"], 0)
                 self.assertTrue(all(p.device.type == "meta" for p in empty.parameters()))
+
+
+    def test_qwen2_q4_quantized_layer_paging(self):
+        """Real tiny Qwen2 architecture with per-group lossy Q4 on disk."""
+        config = Qwen2Config(
+            vocab_size=80, hidden_size=32, intermediate_size=64,
+            num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
+            max_position_embeddings=64, tie_word_embeddings=False,
+            bos_token_id=1, eos_token_id=2,
+        )
+        torch.manual_seed(123)
+        direct = AutoModelForCausalLM.from_config(config, attn_implementation="eager").eval()
+        ids = torch.tensor([[3, 4, 5, 6]], dtype=torch.long)
+        with tempfile.TemporaryDirectory() as tmp:
+            from pathlib import Path
+            raw = Path(tmp) / "original"
+            q_dir = Path(tmp) / "q4"
+            direct.save_pretrained(raw, safe_serialization=True)
+            report = quantize_checkpoint(raw, q_dir, min_elements=128)
+            self.assertLess(report["stored_payload_bytes"], report["original_payload_bytes"])
+            with init_empty_weights(include_buffers=False):
+                empty = AutoModelForCausalLM.from_config(
+                    AutoConfig.from_pretrained(raw, local_files_only=True),
+                    attn_implementation="eager",
+                ).eval()
+            with LayerPager(empty, Q4Index(q_dir), cpu_cache_mb=1, prefetch=True) as pager:
+                with torch.inference_mode():
+                    with pager.session() as model:
+                        result = model(ids, use_cache=True).logits
+                    expected = direct(ids, use_cache=True).logits
+                self.assertTrue(torch.isfinite(result).all().item())
+                self.assertEqual(result.shape, expected.shape)
+                # Lossy Q4 is NOT expected to match original logits bitwise.
+                self.assertLess((result - expected).abs().mean().item(), 1.0)
+                with torch.inference_mode(), pager.session() as model:
+                    again = model(ids, use_cache=True).logits
+                torch.testing.assert_close(again, result, rtol=0, atol=0)
+                self.assertEqual(pager.snapshot()["resident_stage_count"], 0)
 
 
 if __name__ == "__main__":

@@ -20,7 +20,8 @@ class PagedCausalLM:
     @classmethod
     def from_local_dir(cls, directory: str | Path, *, device: str = "cpu",
                        sync_timing: bool = False, prefetch: bool = False,
-                       cpu_cache_mb: int = 0, pin_stages: list[str] | None = None) -> "PagedCausalLM":
+                       cpu_cache_mb: int = 0, pin_stages: list[str] | None = None,
+                       q4_dir: str | Path | None = None) -> "PagedCausalLM":
         try:
             import torch
             from accelerate import init_empty_weights
@@ -28,7 +29,11 @@ class PagedCausalLM:
         except ImportError as exc:
             raise PagingError("Install ironasu[stream] (requires transformers and accelerate)") from exc
         path = Path(directory).expanduser().resolve(strict=True)
-        index = SafetensorsIndex(path)
+        if q4_dir is None:
+            index = SafetensorsIndex(path)
+        else:
+            from .q4 import Q4Index
+            index = Q4Index(q4_dir)
         # Local-only: prohibit downloading weights, tokenizers and remote Python code.
         config = AutoConfig.from_pretrained(path, local_files_only=True, trust_remote_code=False)
         with init_empty_weights(include_buffers=False):
@@ -69,6 +74,7 @@ def main() -> None:
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--device", default="cpu", choices=("cpu", "cuda"))
     parser.add_argument("--tokens", type=int, default=8)
+    parser.add_argument("--q4-dir", default=None, help="optional separately packed ironasu Q4 checkpoint; lossy")
     parser.add_argument("--profile", action="store_true", help="synchronize CUDA for stage timing; slower")
     parser.add_argument("--prefetch", action="store_true", help="bounded one-stage CPU prefetch; needs extra RAM")
     parser.add_argument("--cpu-cache-mb", type=int, default=0,
@@ -84,6 +90,8 @@ def main() -> None:
     args = parser.parse_args()
     selected = {"prefetch": args.prefetch, "cpu_cache_mb": args.cpu_cache_mb,
                 "pin_stages": args.pin_stage}
+    if args.auto_tune and args.q4_dir is not None:
+        parser.error("--auto-tune with --q4-dir is not supported yet; use ironasu-benchmark-q4")
     if args.auto_tune:
         if args.pin_stage is not None or args.prefetch:
             parser.error("--auto-tune cannot be combined with manually selected --pin-stage/--prefetch")
@@ -95,7 +103,7 @@ def main() -> None:
         print(json.dumps({"ironasu_compass": report}, indent=2, ensure_ascii=False))
     engine = PagedCausalLM.from_local_dir(
         args.model_dir, device=args.device, sync_timing=args.profile,
-        **selected,
+        q4_dir=args.q4_dir, **selected,
     )
     try:
         print(engine.generate(args.prompt, max_new_tokens=args.tokens))

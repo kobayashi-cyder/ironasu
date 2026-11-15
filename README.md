@@ -339,3 +339,57 @@ ironasu-stream ./models/my-model --device cpu --prompt 'Review this code' \
 `ironasu-tune` は各候補ごとにモデルを初期化して推論します。巨大モデルでは試験そのものが
 非常に長くなります。なお、この実装はモデルのFLOPsを直接削減せず、先読みや重み再利用の
 候補を試すものです。品質評価には別途コードテストが必要です。
+
+## v0.7: experimental Q4 out-of-core weights (opt-in)
+
+`ironasu` now has its own small **symmetric group-wise Q4** checkpoint format.
+This is an experimental, *lossy* weight packer, **not GGUF/GPTQ/AWQ compatibility**
+and not a fused 4-bit inference kernel. Q4 is stored as packed 4-bit values with
+per-group FP32 scales in per-tensor `safetensors` files; small and nonfloating
+weights are kept verbatim. The original checkpoint is left unchanged.
+
+**Why:** the out-of-core pager rereads weights on every generated token when RAM
+cannot cache them. Reducing source bytes can reduce storage and CPU-to-GPU transfer,
+though unpacking adds CPU/GPU computation and temporary memory. There is **no
+speedup guarantee**; numerical values and generated text can change.
+
+```bash
+pip install -e '.[stream]'
+
+# Convert a trusted LOCAL safetensors checkpoint. Output must be outside
+# the input directory and nonexisting/empty; this does NOT delete originals.
+ironasu-quantize-q4 ./models/qwen2-model --output ./models/qwen2-q4 --group-size 64
+
+# Architecture configuration/tokenizer still come from the original directory.
+ironasu-stream ./models/qwen2-model --q4-dir ./models/qwen2-q4 \
+  --device cpu --tokens 8 --prompt 'Write a Python function to sort a list.'
+
+# Compare the same prompt/repeats; baseline runs first (page-cache-order bias).
+ironasu-benchmark-q4 ./models/qwen2-model --q4-dir ./models/qwen2-q4 \
+  --prompt 'Write a Python function to sort a list.' --tokens 4 \
+  --repeats 2 --output q4-evidence.json
+```
+
+The benchmark records baseline/Q4 median generation latency, indexed tensor
+payload bytes, cache read counters and decoded text equality. The benchmark
+**does not auto-activate Q4**: verify code correctness using a test suite and
+run counterbalanced A/B trials on the actual target hardware before claiming
+faster inference. Output equality for one prompt does not prove equivalence.
+
+Limitations and resource cautions:
+- A full original checkpoint is required during the conversion. The Q4 output
+  is additional disk usage; plan enough free space for both while converting.
+- Conversion is one tensor at a time, not a whole-model tensor allocation; the
+  largest individual tensor and temporary FP32 intermediates still need RAM.
+- Dequantization currently materializes the full layer weights at compute time.
+  Peak activation + GPU weight + unpack intermediate allocations may still OOM.
+- This is an additive experimental format with one file per tensor; huge models
+  may encounter filesystem metadata and open-file overhead. It is **not** a
+  proven faster substitute for optimized GGUF/llama.cpp kernels.
+- For now use dense, supported Transformers models with `safetensors` weights.
+  FP8/MoE layouts, arbitrary custom architectures and 70B+ model correctness
+  have not been validated.
+- `--q4-dir` cannot currently be combined with `--auto-tune`; the existing
+  autotuner requires bit-identical output, which is inappropriate for lossy Q4.
+- The checkpoint manifest uses local path validation and `safetensors` rather
+  than pickle. Keep the original checkpoint secure; do not run untrusted code.

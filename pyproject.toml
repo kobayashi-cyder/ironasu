@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ironasu"
-version = "0.6.0"
+version = "0.7.0"
 description = "Measured local LLM gateway plus experimental out-of-core safetensors inference"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -24,3 +24,6 @@ ironasu-benchmark-airllm = "ironasu.airllm_benchmark:main"
 ironasu-stream = "ironasu.stream:main"
 ironasu-inspect = "ironasu.checkpoint:main"
 ironasu-tune = "ironasu.tuner:main"
+
+ironasu-quantize-q4 = "ironasu.q4:main"
+ironasu-benchmark-q4 = "ironasu.q4_benchmark:main"
