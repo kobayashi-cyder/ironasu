@@ -335,8 +335,11 @@ class Tools:
                     "git_diff_check": ["git", "diff", "--check"],
                 }
                 try:
+                    env = os.environ.copy()
+                    for secret in ("IRONASU_BACKEND_KEY", "OPENAI_API_KEY"):
+                        env.pop(secret, None)
                     done = subprocess.run(commands[kind], cwd=self.s.workspace, capture_output=True,
-                                          text=True, timeout=60, shell=False)
+                                          text=True, timeout=60, shell=False, env=env)
                     return _clip(f"exit={done.returncode}\n{done.stdout}\n{done.stderr}")
                 except subprocess.TimeoutExpired:
                     return "Check timed out after 60 seconds"
@@ -403,6 +406,8 @@ class Harness:
                 raise ValueError("Session workspace mismatch")
             if task and resume:
                 raise ValueError("Pass either a new task or --resume")
+            if resume and row["status"] == "complete" and not row["pending"]:
+                return str(row["messages"][-1].get("content") or "(model returned no text)")
             if task:
                 if row["pending"]:
                     raise RuntimeError("Resolve/resume pending tools before submitting another task")
