@@ -86,6 +86,94 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(fake.calls), 1)
         self.assertEqual(engine.metrics.snapshot()["singleflight_hits"], 4)
 
+    def test_bounded_queue_rejects_third_request_without_waiting(self):
+        entered, release = threading.Event(), threading.Event()
+        class BlockingBackend:
+            def complete(self, payload):
+                entered.set()
+                if not release.wait(3):
+                    raise RuntimeError("blocked test request")
+                return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+        engine = self.setup_engine(BlockingBackend(), max_concurrency=1,
+                                   max_waiting_requests=1, queue_timeout_s=2)
+        errors = []
+        def run(prompt):
+            try:
+                engine.complete({"messages": [{"role": "user", "content": prompt}]})
+            except Exception as exc:
+                errors.append(exc)
+        t1 = threading.Thread(target=run, args=("first",))
+        t2 = threading.Thread(target=run, args=("second",))
+        t1.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            t2.start()
+            limit = time.monotonic() + 2
+            while engine.metrics.snapshot()["waiting_requests"] != 1 and time.monotonic() < limit:
+                time.sleep(0.005)
+            self.assertEqual(engine.metrics.snapshot()["waiting_requests"], 1)
+            with self.assertRaises(InferenceError) as ctx:
+                engine.complete({"messages": [{"role": "user", "content": "third"}]})
+            self.assertEqual(ctx.exception.status, 503)
+            stats = engine.metrics.snapshot()
+            self.assertEqual(stats["overloads"], 1)
+            self.assertEqual(stats["peak_waiting_requests"], 1)
+            self.assertLessEqual(stats["peak_active_requests"], 1)
+        finally:
+            release.set()
+            t1.join(3)
+            t2.join(3)
+        self.assertFalse(t1.is_alive() or t2.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(engine.metrics.snapshot()["active_requests"], 0)
+        self.assertEqual(engine.metrics.snapshot()["waiting_requests"], 0)
+
+    def test_singleflight_followers_respect_waiter_limit(self):
+        entered, release = threading.Event(), threading.Event()
+        class BlockingBackend:
+            def complete(self, payload):
+                entered.set()
+                if not release.wait(3):
+                    raise RuntimeError("blocked test request")
+                return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+        engine = self.setup_engine(BlockingBackend(), max_concurrency=1,
+                                   max_waiting_requests=1)
+        q = {"messages": [{"role": "user", "content": "same"}], "temperature": 0}
+        results, errors = [], []
+        def run():
+            try:
+                results.append(engine.complete(q))
+            except Exception as exc:
+                errors.append(exc)
+        t1, t2 = threading.Thread(target=run), threading.Thread(target=run)
+        t1.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            t2.start()
+            limit = time.monotonic() + 2
+            while engine.metrics.snapshot()["waiting_requests"] != 1 and time.monotonic() < limit:
+                time.sleep(0.005)
+            self.assertEqual(engine.metrics.snapshot()["waiting_requests"], 1)
+            with self.assertRaises(InferenceError) as ctx:
+                engine.complete(q)
+            self.assertEqual(ctx.exception.status, 503)
+        finally:
+            release.set()
+            t1.join(3)
+            t2.join(3)
+        self.assertFalse(t1.is_alive() or t2.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
+        self.assertEqual(engine.metrics.snapshot()["waiting_requests"], 0)
+
+    def test_no_waiting_mode_allows_free_slot_and_rejects_queue(self):
+        engine = self.setup_engine(max_waiting_requests=0)
+        self.assertEqual(engine.complete({"messages": [{"role": "user", "content": "ok"}]})["_ironasu"]["source"], "upstream")
+        with self.assertRaises(ValueError):
+            self.setup_engine(max_waiting_requests=-1)
+        with self.assertRaises(ValueError):
+            self.setup_engine(max_waiting_requests=1025)
+
     def test_streaming_rejected_clearly(self):
         engine = self.setup_engine()
         with self.assertRaisesRegex(InferenceError, "not yet supported"):
