@@ -2,6 +2,14 @@
 
 ## ironasu Studio (offline Web UI)
 
+**New in v1.4: Native GGUF installation without LM Studio or Ollama.**
+Search public Hugging Face models, inspect downloadable GGUF sizes, download
+verified weights to ironasu-managed local storage, resume incomplete transfers,
+cancel active jobs and remove installed files. Downloads are SHA-256 verified.
+No model-runtime backend is required for installation, but a GGUF-compatible
+runtime is still required for inference. See [Native GGUF installation](docs/native-install.md).
+
+
 **New in v1.3: Model installation from the UI.** Click **「＋ モデルを追加」** to download models directly into LM Studio (native v1 model-management API) or Ollama (native Pull API), view download progress, inspect installed models, and explicitly load LM Studio models. No direct installation support is claimed for other backend families; see [モデルの直接インストール](docs/model-install.md).
 
 **Windowsのインストーラー（Python不要）とオフラインwheel配布に対応。** 詳細は [インストールと対応バックエンド](docs/install.md) を参照してください。`ironasu-studio` でLM Studio・Ollama等のローカルサーバーを自動検出して起動できます。

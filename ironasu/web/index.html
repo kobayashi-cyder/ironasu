@@ -126,19 +126,35 @@
         <div><div class="eyebrow">LOCAL MODEL LIBRARY</div><h2 id="model-manager-heading">モデルを直接インストール</h2></div>
         <button class="icon-button" id="close-model-manager" type="button" aria-label="閉じる">×</button>
       </div>
-      <p class="hint">LM Studio / Ollama のローカルサーバーへダウンロードを依頼します。インストール時のみインターネット接続が必要です。保存先は各アプリが管理します。</p>
+      <p class="hint">ironasu単独でHugging Faceから公開GGUFを取得できます。LM Studio / Ollama経由のインストールも引き続き使用可能です。新規取得にはインターネット接続が必要です。</p>
       <form id="model-install-form" class="model-install-form">
         <label for="install-provider">インストール先</label>
         <select id="install-provider">
+          <option value="native">ironasuへ直接保存（外部アプリ不要）</option>
           <option value="lmstudio">LM Studio（127.0.0.1:1234）</option>
           <option value="ollama">Ollama（127.0.0.1:11434）</option>
         </select>
-        <label for="install-model">モデルID または Hugging FaceモデルURL</label>
+        <label for="install-model">モデルリポジトリID / Hugging Face URL</label>
         <input id="install-model" required maxlength="160" autocomplete="off" spellcheck="false" placeholder="ibm/granite-4-micro">
         <div class="model-examples" id="install-examples" aria-label="モデルID例"></div>
-        <label for="install-quantization">量子化（LM StudioのHugging Face URL指定時のみ）</label>
-        <input id="install-quantization" maxlength="24" placeholder="例: Q4_K_M（任意）" autocomplete="off">
-        <p class="hint">モデルごとに容量・ライセンス・必要RAM/VRAMが異なります。取得前に確認してください。モデルのロードは明示操作です。</p>
+        <section id="native-controls" class="native-controls">
+          <div class="native-search-line">
+            <input id="native-search-query" type="search" maxlength="100" placeholder="公開GGUFを検索（例: Qwen3 GGUF）" aria-label="Hugging Faceモデル検索">
+            <button id="native-search-button" class="secondary" type="button">検索</button>
+          </div>
+          <div id="native-search-results" class="model-examples" aria-label="検索結果"></div>
+          <label for="native-file-picker">ダウンロードするGGUFファイル</label>
+          <div class="native-search-line">
+            <select id="native-file-picker" aria-label="GGUFファイル選択"><option value="">先にモデルのファイル一覧を取得してください</option></select>
+            <button id="native-files-button" class="secondary" type="button">ファイル一覧</button>
+          </div>
+          <p class="hint" id="native-file-hint">リポジトリの公開GGUFのみ対象です。保存前に容量とライセンスを確認してください。ファイルはSHA-256で検証します。</p>
+        </section>
+        <div id="lmstudio-quantization">
+          <label for="install-quantization">量子化（LM StudioのHugging Face URL指定時のみ）</label>
+          <input id="install-quantization" maxlength="24" placeholder="例: Q4_K_M（任意）" autocomplete="off">
+        </div>
+        <p class="hint">ironasuの直接保存はモデルの実行・ロードとは別です。保存済みGGUFを推論するには対応ランタイムが必要です。必要RAM/VRAM・ライセンスを必ず確認してください。</p>
         <button class="send-button full" id="install-submit" type="submit">ダウンロードを開始</button>
       </form>
       <p class="error-text" id="model-install-error" role="alert"></p>
@@ -146,7 +162,7 @@
       <div class="inspector-head"><h3>ダウンロード進捗</h3><button type="button" class="text-button" id="refresh-downloads">更新 ⟳</button></div>
       <div id="model-download-list" class="downloads-list" aria-live="polite"><span class="muted">ダウンロード履歴なし</span></div>
       <div class="panel-divider"></div>
-      <div class="inspector-head"><h3>インストール済みモデル</h3><button type="button" class="text-button" id="refresh-installed">更新 ⟳</button></div>
+      <div class="inspector-head"><h3>保存済みモデル</h3><button type="button" class="text-button" id="refresh-installed">更新 ⟳</button></div>
       <div id="installed-model-list" class="downloads-list"><span class="muted">一覧を確認中…</span></div>
     </section>
   </div>

@@ -440,8 +440,8 @@
       ui.keyInput.focus();
     }
   });
-  // Model management. All network calls target this same-origin gateway,
-  // and provider selection is limited server-side to loopback LM Studio/Ollama.
+  // Model management: UI calls only this same-origin gateway. Native model
+  // requests are restricted server-side to public Hugging Face GGUF repos.
   const modelDialog = byId("model-dialog");
   const installProvider = byId("install-provider");
   const installName = byId("install-model");
@@ -449,21 +449,32 @@
   const installError = byId("model-install-error");
   let lastCompleted = "";
   let modelRefreshBusy = false;
+  const nativeControls = byId("native-controls");
+  const nativePicker = byId("native-file-picker");
 
   function updateModelExamples() {
-    const isLM = installProvider.value === "lmstudio";
-    installName.placeholder = isLM ? "ibm/granite-4-micro" : "qwen3:4b";
+    const provider = installProvider.value;
+    const isLM = provider === "lmstudio";
+    const isNative = provider === "native";
+    nativeControls.hidden = !isNative;
+    byId("lmstudio-quantization").hidden = !isLM;
+    installName.placeholder = isNative ? "例: ggml-org/gemma-3-1b-it-GGUF"
+        : isLM ? "ibm/granite-4-micro" : "qwen3:4b";
     installQuant.disabled = !isLM;
     if (!isLM) installQuant.value = "";
-    const samples = isLM
-      ? ["ibm/granite-4-micro", "openai/gpt-oss-20b"]
+    const samples = isNative ? ["ggml-org/gemma-3-1b-it-GGUF"]
+      : isLM ? ["ibm/granite-4-micro", "openai/gpt-oss-20b"]
       : ["qwen3:4b", "gemma3:4b"];
     const examples = byId("install-examples");
     examples.replaceChildren();
     samples.forEach((value) => {
       const button = textNode("button", "small-button", value);
       button.type = "button";
-      button.addEventListener("click", () => { installName.value = value; installName.focus(); });
+      button.addEventListener("click", () => {
+        installName.value = value;
+        clearNativeFiles();
+        installName.focus();
+      });
       examples.append(button);
     });
   }
@@ -493,7 +504,31 @@
         info.append(textNode("strong", "", entry.label || entry.id));
         const detail = (entry.id || "") + " · " + formatBytes(entry.size_bytes);
         info.append(textNode("small", "", detail + (entry.loaded === true ? " · ロード済み" : "")));
+        if (provider === "native" && entry.path) {
+          info.append(textNode("small", "", "保存先: " + entry.path));
+        }
         row.append(info);
+        if (provider === "native") {
+          const copy = textNode("button", "small-button", "パスをコピー");
+          copy.type = "button";
+          copy.addEventListener("click", async () => {
+            try { await navigator.clipboard.writeText(entry.path || ""); }
+            catch (_) { installError.textContent = "パスをコピーできませんでした"; }
+          });
+          const remove = textNode("button", "small-button", "削除");
+          remove.type = "button";
+          remove.addEventListener("click", async () => {
+            if (!window.confirm(entry.label + " をironasu保存領域から削除しますか？")) return;
+            installError.textContent = "";
+            try {
+              await fetchJson("/ui/models/native/remove", {
+                method: "POST", body: JSON.stringify({ id: entry.id })
+              });
+              await refreshInstalledModels();
+            } catch (error) { installError.textContent = error.message; }
+          });
+          row.append(copy, remove);
+        }
         if (provider === "lmstudio" && entry.loaded === false) {
           const load = textNode("button", "small-button", "ロード");
           load.type = "button";
@@ -534,7 +569,21 @@
         const card = textNode("div", "download-job", "");
         card.append(textNode("strong", "", job.model + " · " + job.provider));
         card.append(textNode("small", "", (job.detail || job.state) + " [" + job.state + "]"));
-        if (job.state === "downloading" || job.state === "pending") {
+        if (job.provider === "native" &&
+              ["downloading", "pending"].includes(job.state)) {
+          const cancel = textNode("button", "small-button", "中断");
+          cancel.type = "button";
+          cancel.addEventListener("click", async () => {
+            try {
+              await fetchJson("/ui/models/native/cancel", {
+                method: "POST", body: JSON.stringify({ id: job.id })
+              });
+              refreshModelDownloads();
+            } catch (error) { installError.textContent = error.message; }
+          });
+          card.append(cancel);
+        }
+        if (job.state === "downloading" || job.state === "pending" || job.state === "verifying") {
           const bar = document.createElement("progress");
           bar.max = 100;
           if (typeof job.total_bytes === "number" && job.total_bytes > 0
@@ -565,6 +614,72 @@
     }
   }
 
+  function clearNativeFiles() {
+    nativePicker.replaceChildren(new Option("モデルのファイル一覧を取得してください", ""));
+    byId("native-file-hint").textContent = "公開GGUFファイルの容量とSHA-256を確認してから取得してください。";
+  }
+
+  async function lookupNativeFiles() {
+    const repo = installName.value.trim();
+    installError.textContent = "";
+    clearNativeFiles();
+    if (!repo) {
+      installError.textContent = "モデルリポジトリIDを入力してください。";
+      return;
+    }
+    const button = byId("native-files-button");
+    button.disabled = true;
+    try {
+      const result = await fetchJson("/ui/models/native/files?repo=" + encodeURIComponent(repo));
+      if (!Array.isArray(result.files) || !result.files.length) {
+        throw new Error("SHA-256で検証できる公開GGUFファイルがありません。");
+      }
+      nativePicker.replaceChildren(new Option("GGUFを選択", ""));
+      result.files.forEach((file) => {
+        const option = new Option(file.path + " (" + formatBytes(file.size_bytes) + ")", file.path);
+        option.dataset.sha256 = file.sha256;
+        nativePicker.add(option);
+      });
+      byId("native-file-hint").textContent = String(result.files.length)
+        + "件のGGUFが見つかりました。量子化ごとのサイズを確認して選択してください。";
+    } catch (error) {
+      installError.textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function searchNative() {
+    const q = byId("native-search-query").value.trim();
+    const results = byId("native-search-results");
+    results.replaceChildren();
+    if (q.length < 2) {
+      installError.textContent = "検索語を2文字以上入力してください。";
+      return;
+    }
+    installError.textContent = "";
+    const button = byId("native-search-button");
+    button.disabled = true;
+    try {
+      const result = await fetchJson("/ui/models/native/search?q=" + encodeURIComponent(q));
+      if (!Array.isArray(result.models) || result.models.length === 0) {
+        results.append(textNode("small", "muted", "公開モデルが見つかりません"));
+      } else {
+        result.models.forEach((model) => {
+          const choose = textNode("button", "small-button", model.id);
+          choose.type = "button";
+          choose.addEventListener("click", () => {
+            installName.value = model.id;
+            clearNativeFiles();
+            lookupNativeFiles();
+          });
+          results.append(choose);
+        });
+      }
+    } catch (error) { installError.textContent = error.message; }
+    finally { button.disabled = false; }
+  }
+
   function closeModelDialog() {
     modelDialog.hidden = true;
     // Do not interrupt a download: it is owned by the local model server.
@@ -586,7 +701,17 @@
   });
   installProvider.addEventListener("change", () => {
     updateModelExamples();
+    clearNativeFiles();
     refreshInstalledModels();
+  });
+  installName.addEventListener("input", clearNativeFiles);
+  byId("native-files-button").addEventListener("click", lookupNativeFiles);
+  byId("native-search-button").addEventListener("click", searchNative);
+  byId("native-search-query").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      searchNative();
+    }
   });
   byId("refresh-downloads").addEventListener("click", refreshModelDownloads);
   byId("refresh-installed").addEventListener("click", refreshInstalledModels);
@@ -600,7 +725,12 @@
         provider: installProvider.value,
         model: installName.value.trim()
       };
-      if (installQuant.value.trim()) payload.quantization = installQuant.value.trim();
+      if (payload.provider === "native") {
+        payload.file = nativePicker.value;
+        if (!payload.file) throw new Error("ファイル一覧を取得し、GGUFファイルを選択してください。");
+      } else if (installQuant.value.trim()) {
+        payload.quantization = installQuant.value.trim();
+      }
       const data = await fetchJson("/ui/models/download", {
         method: "POST", body: JSON.stringify(payload)
       });

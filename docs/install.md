@@ -1,4 +1,9 @@
-# ironasu Studio installation and backend compatibility (v1.2)
+# ironasu Studio installation and backend compatibility (v1.4)
+
+v1.4は外部モデル管理アプリなしでも、Hugging Faceから公開GGUFモデルを
+直接保存できます。ダウンロードにはインターネット接続が必要ですが、
+保存済みモデルはオフラインで管理できます。推論には別途GGUF対応の実行エンジンが必要です。
+[ネイティブGGUFインストール](native-install.md)を参照してください。
 
 This package installs an **offline-first local Web UI plus an inference gateway**.
 It does not bundle model weights, LM Studio, Ollama, GPU drivers or any model
