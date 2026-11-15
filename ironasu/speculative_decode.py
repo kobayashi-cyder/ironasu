@@ -90,6 +90,10 @@ class GreedySpeculativeDecoder:
         emitted: list[int] = []
         draft_calls = accepted = proposed = target_calls = 0
         while len(emitted) < max_new_tokens:
+            # Measure the COMPLETE cycle (scheduler, draft lookup, synchronization,
+            # target verification and index maintenance). Target-only timing would
+            # systematically overstate speculation gains on CPU/slow draft paths.
+            started = perf_counter()
             choice = self.scheduler.choose(
                 backend_supports_speculation=True, queue_busy=queue_busy,
                 memory_headroom=memory_headroom)
@@ -98,39 +102,39 @@ class GreedySpeculativeDecoder:
             limit = min(choice.draft_tokens, max(0, remaining - 1))
             proposal = self.index.propose(history[-self.index.order:], limit) if limit else ()
             self.synchronize()
-            started = perf_counter()
             target_predictions = self.target(tuple(history), proposal)
             self.synchronize()
-            elapsed = perf_counter() - started
             target_calls += 1
             result = verify_greedy(proposal, target_predictions)
-            # Proposals have already been verified here. Never count speculative
-            # tokens as accepted before this check.
+            # A proposal is untrusted until the target verifier accepts it.
             if proposal:
                 draft_calls += 1
                 proposed += len(proposal)
-                accepted += result.accepted
-                if len(proposal) in self.scheduler.draft_lengths:
-                    self.scheduler.record_speculative(
-                        len(proposal), result.accepted, elapsed, len(result.emitted))
-                else:
-                    # An uncalibrated partial draft is neither a target-only
-                    # baseline nor an observation for a configured draft arm.
-                    pass
-            else:
-                self.scheduler.record_baseline(elapsed, 1)
             # Stop at EOS; never append tokens beyond EOS even if the verifier
             # returned a longer accepted draft prefix.
             finished = False
+            emitted_this_cycle = 0
             for token in result.emitted[:remaining]:
                 history.append(token)
                 emitted.append(token)
+                emitted_this_cycle += 1
                 if token in eos:
                     finished = True
                     break
             # Update recent index after VERIFIED tokens only, bounded workload.
             span = self.index.order + self.index.max_draft + 1
             self.index.remember(history[-span:])
+            elapsed = perf_counter() - started
+            if proposal:
+                # Do not attribute verifier predictions after EOS to emitted output.
+                accepted_this_cycle = min(result.accepted, emitted_this_cycle)
+                accepted += accepted_this_cycle
+                if len(proposal) in self.scheduler.draft_lengths:
+                    self.scheduler.record_speculative(
+                        len(proposal), accepted_this_cycle, elapsed, emitted_this_cycle)
+                # An uncalibrated short draft is not a configured arm or a baseline.
+            else:
+                self.scheduler.record_baseline(elapsed, emitted_this_cycle)
             if finished:
                 break
         return DecodeReport(tuple(emitted), target_calls, draft_calls,
