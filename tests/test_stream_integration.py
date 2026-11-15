@@ -92,7 +92,7 @@ class RealTransformersTests(unittest.TestCase):
                         self.assertEqual(accepted.accepted, 1)
                         self.assertEqual(
                             accepted.emitted,
-                            tuple(int(x) for x in normal_tokens[0, ids.shape[1]:].tolist()))
+                            tuple(int(x) for x in normal_tokens[0, ids.shape[1]:ids.shape[1] + 2].tolist()))
                         # Reuse only a cache proven to represent the accepted
                         # prefix; otherwise safely replay all context tokens.
                         follow_up = verifier(context + accepted.emitted, ())
