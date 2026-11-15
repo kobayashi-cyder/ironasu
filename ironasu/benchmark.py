@@ -26,9 +26,10 @@ class Completion:
     completion_tokens: int | None
 
     def __post_init__(self):
-        if not isinstance(self.content, str) or not isfinite(self.elapsed_seconds) or self.elapsed_seconds <= 0:
+        if (not isinstance(self.content, str) or isinstance(self.elapsed_seconds, bool)
+                or not isfinite(self.elapsed_seconds) or self.elapsed_seconds <= 0):
             raise ValueError("invalid completion or timing")
-        if self.completion_tokens is not None and self.completion_tokens < 0:
+        if self.completion_tokens is not None and (type(self.completion_tokens) is not int or self.completion_tokens < 0):
             raise ValueError("completion token count cannot be negative")
 
 
@@ -39,6 +40,8 @@ def _pct(values: list[float], percentile: int) -> float:
 
 
 def summarize(completions: list[Completion]) -> dict:
+    if not completions:
+        raise ValueError("cannot summarize an empty run")
     latencies = [r.elapsed_seconds for r in completions]
     tokens = [r.completion_tokens for r in completions]
     measured_tokens = sum(t for t in tokens if t is not None)
@@ -95,9 +98,18 @@ def compare(
         "exact_output_match_rate": 1 - len(mismatches) / len(b_rows),
         "mismatches": mismatches,  # indices only; never echo user prompts/outputs
         "p50_latency_speedup": baseline_stats["p50_seconds"] / candidate_stats["p50_seconds"],
+        "p95_latency_speedup": baseline_stats["p95_seconds"] / candidate_stats["p95_seconds"],
+        "serialized_throughput_speedup": (
+            candidate_stats["throughput_tokens_per_wall_second"]
+            / baseline_stats["throughput_tokens_per_wall_second"]
+            if (baseline_stats["throughput_tokens_per_wall_second"] is not None
+                and baseline_stats["throughput_tokens_per_wall_second"] > 0
+                and candidate_stats["throughput_tokens_per_wall_second"] is not None)
+            else None),
         "limitations": [
             "HTTP wall-clock measurements include queue/network overhead, not just model decode.",
-            "GPU/RAM/SSD/energy telemetry is not collected by this tool.",
+            "Serialized tokens/s is measured across sequential HTTP calls; it is not concurrent throughput.",
+            "TTFT/TPOT and GPU/RAM/SSD/energy telemetry are not collected by this tool.",
             "A mismatch can reflect model/quantization/tokenizer/seed/server differences.",
             "A speedup is established only for the measured inputs and test environment.",
         ],
