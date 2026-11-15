@@ -10,7 +10,7 @@ you disconnect from the Internet.
 1. Open the [offline installer workflow](https://github.com/kobayashi-cyder/ironasu/actions/workflows/windows-installer.yml).
 2. Select a **successful** run on the main branch and download the
    `ironasu-studio-windows-x64-offline-installers` artifact.
-3. Unzip that artifact and run `ironasu-studio-1.2.0-windows-x64-setup.exe`.
+3. Unzip that artifact and run `ironasu-studio-1.3.0-windows-x64-setup.exe`.
    The installer is per-user and adds a Start Menu shortcut. It installs
    completely offline and does not need administrator privileges.
 4. Launch **ironasu Studio** from the Start Menu. A local browser tab opens
@@ -42,7 +42,7 @@ ironasu-studio
 Offline wheel installation (wheel downloaded and copied to the PC in advance):
 
 ```sh
-python -m pip install --no-index --no-deps ./ironasu-1.2.0-py3-none-any.whl
+python -m pip install --no-index --no-deps ./ironasu-1.3.0-py3-none-any.whl
 ironasu-studio --provider auto
 ```
 

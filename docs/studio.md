@@ -52,6 +52,14 @@ PCで `python -m pip install --no-index --no-build-isolation -e .` を利用し�
 UI用の追加Python/Nodeライブラリは**不要**です。wheel配布時には
 `ironasu/web/index.html`、`ui.css`、`ui.js` が同梱されます。
 
+## モデルのインストール
+
+v1.3以降は、画面右上の **「＋ モデルを追加」** から直接モデルを取得できます。
+LM Studio / Ollamaを事前に起動し、モデルIDを入力すると、各公式ローカルAPIが
+重みの取得・保存を管理します。進捗とインストール済み一覧を画面内で確認できます。
+LM Studioはモデルのロード操作も画面内で実行できます。詳細は
+[モデルの直接インストール](model-install.md) を参照してください。
+
 ## 使える機能
 
 - 会話の新規作成・切替・削除、JSONエクスポート、応答コピー。
