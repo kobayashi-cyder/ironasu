@@ -12,10 +12,17 @@ from .paging import LayerPager, PagingError, SafetensorsIndex
 
 
 class PagedCausalLM:
-    def __init__(self, model: Any, tokenizer: Any, pager: LayerPager):
+    def __init__(self, model: Any, tokenizer: Any, pager: LayerPager, *,
+                 kv_cache_mb: int = 0, kv_cache_entries: int = 8):
+        from .kv_cache import PrefixKVCache
+        if type(kv_cache_mb) is not int or kv_cache_mb < 0:
+            raise ValueError("kv_cache_mb must be a nonnegative integer")
         self.model = model
         self.tokenizer = tokenizer
         self.pager = pager
+        self.kv_cache = (PrefixKVCache(max_bytes=kv_cache_mb * 1024**2,
+                                       max_entries=kv_cache_entries)
+                         if kv_cache_mb else None)
 
     @classmethod
     def from_local_dir(cls, directory: str | Path, *, device: str = "cpu",
@@ -23,7 +30,8 @@ class PagedCausalLM:
                        cpu_cache_mb: int = 0, pin_stages: list[str] | None = None,
                        q4_dir: str | Path | None = None,
                        expert_paging: bool = False, expert_cache_mb: int = 0,
-                       use_mxfp4: bool = False) -> "PagedCausalLM":
+                       use_mxfp4: bool = False, kv_cache_mb: int = 0,
+                       kv_cache_entries: int = 8) -> "PagedCausalLM":
         try:
             import torch
             from accelerate import init_empty_weights
@@ -51,7 +59,8 @@ class PagedCausalLM:
                            prefetch=prefetch, cpu_cache_mb=cpu_cache_mb,
                            pin_stages=pin_stages, expert_paging=expert_paging,
                            expert_cache_mb=expert_cache_mb)
-        return cls(model, tokenizer, pager)
+        return cls(model, tokenizer, pager,
+                   kv_cache_mb=kv_cache_mb, kv_cache_entries=kv_cache_entries)
 
     def generate(self, prompt: str, *, max_new_tokens: int = 16) -> str:
         if not isinstance(prompt, str) or not prompt:
@@ -61,16 +70,33 @@ class PagedCausalLM:
         import torch
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.pager.device)
         with self.pager.session() as model, torch.inference_mode():
-            output = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                use_cache=True,
-                pad_token_id=self.tokenizer.eos_token_id,
-            )
-        return self.tokenizer.decode(output[0, inputs["input_ids"].shape[-1]:], skip_special_tokens=True)
+            if self.kv_cache is None:
+                output = model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                    use_cache=True,
+                    pad_token_id=self.tokenizer.eos_token_id,
+                )
+                generated = output[0, inputs["input_ids"].shape[-1]:]
+            else:
+                from .kv_cache import greedy_decode_with_exact_prefix
+                generated = greedy_decode_with_exact_prefix(
+                    model, inputs, max_new_tokens=max_new_tokens,
+                    kv_cache=self.kv_cache, eos_token_id=self.tokenizer.eos_token_id)[0]
+        return self.tokenizer.decode(generated, skip_special_tokens=True)
+
+    def reset_kv_cache(self) -> None:
+        """Invalidate cached prefixes before changing weights or tokenizer."""
+        if self.kv_cache is not None:
+            self.kv_cache.reset()
+
+    def kv_cache_snapshot(self) -> dict[str, Any]:
+        return (self.kv_cache.snapshot() if self.kv_cache is not None
+                else {"enabled": False})
 
     def close(self) -> None:
+        self.reset_kv_cache()
         self.pager.close()
 
 
@@ -95,6 +121,12 @@ def main() -> None:
                         help="sparse ModuleList expert hooks; only selected experts loaded")
     parser.add_argument("--expert-cache-mb", type=int, default=0,
                         help="bounded CPU LRU of routed experts in MiB; requires --expert-paging")
+    parser.add_argument("--kv-cache-mb", type=int, default=0,
+                        help="opt-in exact-token greedy KV reuse; payload MiB limit, 0 disables")
+    parser.add_argument("--kv-cache-entries", type=int, default=8,
+                        help="max number of cached prompts, 1..128")
+    parser.add_argument("--repeat", type=int, default=1,
+                        help="repeat the same prompt (useful for KV warm-hit test), 1..100")
     parser.add_argument("--auto-tune", action="store_true",
                         help="opt-in: compare paging strategies on a short same-prompt trial before generating")
     parser.add_argument("--tune-tokens", type=int, default=2,
@@ -102,6 +134,10 @@ def main() -> None:
     parser.add_argument("--tune-repeats", type=int, default=2,
                         help="per-strategy repetitions, 1..10 (default 2)")
     args = parser.parse_args()
+    if not 1 <= args.repeat <= 100:
+        parser.error("--repeat must be in 1..100")
+    if args.kv_cache_mb < 0 or not 1 <= args.kv_cache_entries <= 128:
+        parser.error("--kv-cache-mb must be >=0 and --kv-cache-entries in 1..128")
     selected = {"prefetch": args.prefetch, "cpu_cache_mb": args.cpu_cache_mb,
                 "pin_stages": args.pin_stage}
     if args.native_mxfp4 and args.q4_dir is not None:
@@ -124,11 +160,16 @@ def main() -> None:
     engine = PagedCausalLM.from_local_dir(
         args.model_dir, device=args.device, sync_timing=args.profile,
         q4_dir=args.q4_dir, expert_paging=args.expert_paging,
-        expert_cache_mb=args.expert_cache_mb, use_mxfp4=args.native_mxfp4, **selected,
+        expert_cache_mb=args.expert_cache_mb, use_mxfp4=args.native_mxfp4,
+        kv_cache_mb=args.kv_cache_mb, kv_cache_entries=args.kv_cache_entries,
+        **selected,
     )
     try:
-        print(engine.generate(args.prompt, max_new_tokens=args.tokens))
-        print(json.dumps(engine.pager.snapshot(), ensure_ascii=False, indent=2))
+        for _ in range(args.repeat):
+            print(engine.generate(args.prompt, max_new_tokens=args.tokens))
+        print(json.dumps({"pager": engine.pager.snapshot(),
+                          "kv_cache": engine.kv_cache_snapshot()},
+                         ensure_ascii=False, indent=2))
     finally:
         engine.close()
 
