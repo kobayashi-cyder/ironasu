@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 import hmac
 import json
 import threading
 import webbrowser
 
 from .core import AdaptiveEngine, Config, InferenceError
+from .models import ModelManager
 
 MAX_BODY_BYTES = 2 * 1024 * 1024
 ASSETS = {
@@ -26,9 +27,10 @@ CSP = (
 )
 
 
-def make_handler(engine: AdaptiveEngine):
+def make_handler(engine: AdaptiveEngine, models: ModelManager | None = None):
     """A handler factory so HTTP integration tests can use fake backends."""
     settings = engine.config
+    models = models or ModelManager(settings)
 
     class Handler(BaseHTTPRequestHandler):
         def _send_bytes(self, code: int, data: bytes, content_type: str) -> None:
@@ -54,7 +56,8 @@ def make_handler(engine: AdaptiveEngine):
             return hmac.compare_digest(token, "Bearer " + expected)
 
         def do_GET(self) -> None:
-            path = urlsplit(self.path).path
+            parsed = urlsplit(self.path)
+            path = parsed.path
             if path in ASSETS:
                 name, content_type = ASSETS[path]
                 data = resources.files("ironasu.web").joinpath(name).read_bytes()
@@ -74,6 +77,14 @@ def make_handler(engine: AdaptiveEngine):
                         for model in ("ironasu", "ironasu-fast", "ironasu-quality")
                     ],
                 })
+            elif path == "/ui/models/downloads":
+                self._send(200, {"jobs": models.list_jobs()})
+            elif path == "/ui/models/installed":
+                provider = parse_qs(parsed.query).get("provider", [""])[0]
+                try:
+                    self._send(200, {"models": models.installed(provider)})
+                except InferenceError as exc:
+                    self._send(exc.status, {"error": {"message": str(exc)}})
             elif path == "/ui/status":
                 discovered = engine.upstream_models()
                 fast, quality = engine.effective_models(discovered)
@@ -93,19 +104,61 @@ def make_handler(engine: AdaptiveEngine):
             else:
                 self._send(404, {"error": {"message": "not found"}})
 
+        def _read_json(self, *, cap: int = MAX_BODY_BYTES) -> dict:
+            try:
+                size = int(self.headers.get("Content-Length", "-1"))
+            except ValueError as exc:
+                raise InferenceError("invalid Content-Length", 400) from exc
+            if size < 0 or size > cap:
+                raise InferenceError("invalid or oversized request", 413)
+            if not self.headers.get("Content-Type", "").lower().startswith("application/json"):
+                raise InferenceError("Content-Type must be application/json", 415)
+            try:
+                data = json.loads(self.rfile.read(size))
+            except (ValueError, UnicodeDecodeError) as exc:
+                raise InferenceError("invalid JSON request", 400) from exc
+            if not isinstance(data, dict):
+                raise InferenceError("request must be an object", 400)
+            return data
+
+        def _same_origin(self) -> bool:
+            if self.headers.get("Sec-Fetch-Site", "") == "cross-site":
+                return False
+            origin = self.headers.get("Origin")
+            if not origin:
+                return True  # Local CLI callers generally omit Origin.
+            parsed = urlsplit(origin)
+            return (parsed.scheme in ("http", "https")
+                    and parsed.netloc == self.headers.get("Host", "")
+                    and parsed.path in ("", "/"))
+
         def do_POST(self) -> None:
             if not self._authorized():
                 self._send(401, {"error": {"message": "unauthorized"}})
                 return
-            if urlsplit(self.path).path != "/v1/chat/completions":
+            path = urlsplit(self.path).path
+            if path not in ("/v1/chat/completions", "/ui/models/download", "/ui/models/load"):
                 self._send(404, {"error": {"message": "not found"}})
                 return
+            if not self._same_origin():
+                self._send(403, {"error": {"message": "cross-site write denied"}})
+                return
             try:
-                size = int(self.headers.get("Content-Length", "-1"))
-                if size < 0 or size > MAX_BODY_BYTES:
-                    raise InferenceError("invalid or oversized request", 413)
-                request = json.loads(self.rfile.read(size))
-                if isinstance(request, dict) and request.get("stream") is True:
+                request = self._read_json(
+                    cap=8192 if path.startswith("/ui/models/") else MAX_BODY_BYTES
+                )
+                if path == "/ui/models/download":
+                    result = models.start(
+                        request.get("provider", ""), request.get("model"),
+                        request.get("quantization"),
+                    )
+                    self._send(202, {"job": result})
+                    return
+                if path == "/ui/models/load":
+                    result = models.load(request.get("provider", ""), request.get("model"))
+                    self._send(200, result)
+                    return
+                if request.get("stream") is True:
                     with engine.stream(request) as response:
                         self.send_response(200)
                         self.send_header("Content-Type", "text/event-stream; charset=utf-8")

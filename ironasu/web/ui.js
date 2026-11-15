@@ -440,6 +440,182 @@
       ui.keyInput.focus();
     }
   });
+  // Model management. All network calls target this same-origin gateway,
+  // and provider selection is limited server-side to loopback LM Studio/Ollama.
+  const modelDialog = byId("model-dialog");
+  const installProvider = byId("install-provider");
+  const installName = byId("install-model");
+  const installQuant = byId("install-quantization");
+  const installError = byId("model-install-error");
+  let lastCompleted = "";
+  let modelRefreshBusy = false;
+
+  function updateModelExamples() {
+    const isLM = installProvider.value === "lmstudio";
+    installName.placeholder = isLM ? "ibm/granite-4-micro" : "qwen3:4b";
+    installQuant.disabled = !isLM;
+    if (!isLM) installQuant.value = "";
+    const samples = isLM
+      ? ["ibm/granite-4-micro", "openai/gpt-oss-20b"]
+      : ["qwen3:4b", "gemma3:4b"];
+    const examples = byId("install-examples");
+    examples.replaceChildren();
+    samples.forEach((value) => {
+      const button = textNode("button", "small-button", value);
+      button.type = "button";
+      button.addEventListener("click", () => { installName.value = value; installName.focus(); });
+      examples.append(button);
+    });
+  }
+
+  function formatBytes(value) {
+    if (typeof value !== "number" || value < 0) return "容量未取得";
+    if (value === 0) return "0 B";
+    const u = ["B", "KiB", "MiB", "GiB", "TiB"];
+    const ix = Math.min(Math.floor(Math.log(value) / Math.log(1024)), u.length - 1);
+    return (value / Math.pow(1024, ix)).toFixed(ix > 1 ? 1 : 0) + " " + u[ix];
+  }
+
+  async function refreshInstalledModels() {
+    const target = byId("installed-model-list");
+    try {
+      const provider = installProvider.value;
+      const data = await fetchJson("/ui/models/installed?provider=" + encodeURIComponent(provider));
+      if (installProvider.value !== provider) return;
+      target.replaceChildren();
+      if (!Array.isArray(data.models) || data.models.length === 0) {
+        target.append(textNode("span", "muted", "モデルはまだインストールされていません。"));
+        return;
+      }
+      data.models.forEach((entry) => {
+        const row = textNode("div", "model-result", "");
+        const info = textNode("div", "model-result-text", "");
+        info.append(textNode("strong", "", entry.label || entry.id));
+        const detail = (entry.id || "") + " · " + formatBytes(entry.size_bytes);
+        info.append(textNode("small", "", detail + (entry.loaded === true ? " · ロード済み" : "")));
+        row.append(info);
+        if (provider === "lmstudio" && entry.loaded === false) {
+          const load = textNode("button", "small-button", "ロード");
+          load.type = "button";
+          load.addEventListener("click", async () => {
+            load.disabled = true;
+            installError.textContent = "";
+            try {
+              const loaded = await fetchJson("/ui/models/load", {
+                method: "POST", body: JSON.stringify({ provider, model: entry.id })
+              });
+              if (loaded.status !== "loaded") throw new Error("モデルのロード結果を確認できません: " + loaded.status);
+              await Promise.all([refreshStatus(), refreshInstalledModels()]);
+            } catch (error) {
+              installError.textContent = error.message;
+            } finally {
+              load.disabled = false;
+            }
+          });
+          row.append(load);
+        }
+        target.append(row);
+      });
+    } catch (error) {
+      target.replaceChildren(textNode("span", "muted", "取得失敗: " + error.message));
+    }
+  }
+
+  async function refreshModelDownloads() {
+    if (modelRefreshBusy) return;
+    modelRefreshBusy = true;
+    try {
+      const data = await fetchJson("/ui/models/downloads");
+      const target = byId("model-download-list");
+      target.replaceChildren();
+      const jobs = Array.isArray(data.jobs) ? data.jobs.slice(0, 30) : [];
+      if (!jobs.length) target.append(textNode("span", "muted", "ダウンロード履歴なし"));
+      jobs.forEach((job) => {
+        const card = textNode("div", "download-job", "");
+        card.append(textNode("strong", "", job.model + " · " + job.provider));
+        card.append(textNode("small", "", (job.detail || job.state) + " [" + job.state + "]"));
+        if (job.state === "downloading" || job.state === "pending") {
+          const bar = document.createElement("progress");
+          bar.max = 100;
+          if (typeof job.total_bytes === "number" && job.total_bytes > 0
+              && typeof job.completed_bytes === "number") {
+            bar.value = Math.max(0, Math.min(100, 100 * job.completed_bytes / job.total_bytes));
+          }
+          card.append(bar);
+          if (typeof job.completed_bytes === "number") {
+            card.append(textNode("small", "", formatBytes(job.completed_bytes)
+                + " / " + formatBytes(job.total_bytes)
+                + (job.provider === "ollama" ? "（現在のレイヤー）" : "")));
+          }
+        }
+        target.append(card);
+      });
+      const completed = jobs.filter((j) => j.state === "completed").map((j) => j.id).join("|");
+      if (completed !== lastCompleted) {
+        lastCompleted = completed;
+        if (completed) {
+          await refreshInstalledModels();
+          await refreshStatus();
+        }
+      }
+    } catch (error) {
+      byId("model-download-list").replaceChildren(textNode("span", "muted", error.message));
+    } finally {
+      modelRefreshBusy = false;
+    }
+  }
+
+  function closeModelDialog() {
+    modelDialog.hidden = true;
+    // Do not interrupt a download: it is owned by the local model server.
+  }
+  byId("open-model-manager").addEventListener("click", async () => {
+    closePanels();
+    modelDialog.hidden = false;
+    installError.textContent = "";
+    updateModelExamples();
+    await Promise.all([refreshModelDownloads(), refreshInstalledModels()]);
+    installName.focus();
+  });
+  byId("close-model-manager").addEventListener("click", closeModelDialog);
+  modelDialog.addEventListener("click", (e) => {
+    if (e.target === modelDialog) closeModelDialog();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !modelDialog.hidden) closeModelDialog();
+  });
+  installProvider.addEventListener("change", () => {
+    updateModelExamples();
+    refreshInstalledModels();
+  });
+  byId("refresh-downloads").addEventListener("click", refreshModelDownloads);
+  byId("refresh-installed").addEventListener("click", refreshInstalledModels);
+  byId("model-install-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    installError.textContent = "";
+    const button = byId("install-submit");
+    button.disabled = true;
+    try {
+      const payload = {
+        provider: installProvider.value,
+        model: installName.value.trim()
+      };
+      if (installQuant.value.trim()) payload.quantization = installQuant.value.trim();
+      const data = await fetchJson("/ui/models/download", {
+        method: "POST", body: JSON.stringify(payload)
+      });
+      if (!data.job?.id) throw new Error("ダウンロードジョブが開始できませんでした。");
+      await refreshModelDownloads();
+    } catch (error) {
+      installError.textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  });
+  setInterval(() => {
+    if (!modelDialog.hidden && !document.hidden) refreshModelDownloads();
+  }, 1800);
+
   load();
   if (!sessions.length) newSession();
   else { if (!activeId) activeId = sessions[0].id; render(); }

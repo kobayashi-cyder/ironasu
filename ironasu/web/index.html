@@ -40,6 +40,7 @@
               <option value="quality">高品質モデル</option>
             </select>
           </label>
+          <button class="model-install-trigger" id="open-model-manager" type="button">＋ モデルを追加</button>
           <button class="status-pill" id="connection-status" title="接続状態を更新"><span class="dot"></span><span id="connection-text">確認中</span></button>
           <button class="icon-button inspector-toggle" id="toggle-inspector" aria-label="設定パネルを切り替える">⚙</button>
         </div>
@@ -112,13 +113,43 @@
       <div class="health-line"><span>高品質モデル</span><code id="quality-model">—</code></div>
       <div class="panel-divider"></div>
       <div class="inspector-head"><h2>上流のモデル</h2><span class="tag neutral" id="model-count">—</span></div>
-      <p class="hint">表示はバックエンドの /v1/models によります。実際のロード・アンロードはLM Studioなどのバックエンド側で行います。</p>
+      <p class="hint">モデルのインストールは右上の「モデルを追加」から行えます。LM Studioはダウンロード後にロードが必要です。</p>
       <div class="model-list" id="backend-models"><span class="muted">モデルを確認中…</span></div>
       <div class="panel-divider"></div>
       <div class="hint">API: <code>/v1/chat/completions</code><br>Models: <code>/v1/models</code><br>Metrics: <code>/metrics</code></div>
     </aside>
   </div>
   <div class="screen-scrim" id="scrim" hidden></div>
+  <div class="model-dialog-overlay" id="model-dialog" hidden>
+    <section class="model-dialog" role="dialog" aria-modal="true" aria-labelledby="model-manager-heading">
+      <div class="model-dialog-head">
+        <div><div class="eyebrow">LOCAL MODEL LIBRARY</div><h2 id="model-manager-heading">モデルを直接インストール</h2></div>
+        <button class="icon-button" id="close-model-manager" type="button" aria-label="閉じる">×</button>
+      </div>
+      <p class="hint">LM Studio / Ollama のローカルサーバーへダウンロードを依頼します。インストール時のみインターネット接続が必要です。保存先は各アプリが管理します。</p>
+      <form id="model-install-form" class="model-install-form">
+        <label for="install-provider">インストール先</label>
+        <select id="install-provider">
+          <option value="lmstudio">LM Studio（127.0.0.1:1234）</option>
+          <option value="ollama">Ollama（127.0.0.1:11434）</option>
+        </select>
+        <label for="install-model">モデルID または Hugging FaceモデルURL</label>
+        <input id="install-model" required maxlength="160" autocomplete="off" spellcheck="false" placeholder="ibm/granite-4-micro">
+        <div class="model-examples" id="install-examples" aria-label="モデルID例"></div>
+        <label for="install-quantization">量子化（LM StudioのHugging Face URL指定時のみ）</label>
+        <input id="install-quantization" maxlength="24" placeholder="例: Q4_K_M（任意）" autocomplete="off">
+        <p class="hint">モデルごとに容量・ライセンス・必要RAM/VRAMが異なります。取得前に確認してください。モデルのロードは明示操作です。</p>
+        <button class="send-button full" id="install-submit" type="submit">ダウンロードを開始</button>
+      </form>
+      <p class="error-text" id="model-install-error" role="alert"></p>
+      <div class="panel-divider"></div>
+      <div class="inspector-head"><h3>ダウンロード進捗</h3><button type="button" class="text-button" id="refresh-downloads">更新 ⟳</button></div>
+      <div id="model-download-list" class="downloads-list" aria-live="polite"><span class="muted">ダウンロード履歴なし</span></div>
+      <div class="panel-divider"></div>
+      <div class="inspector-head"><h3>インストール済みモデル</h3><button type="button" class="text-button" id="refresh-installed">更新 ⟳</button></div>
+      <div id="installed-model-list" class="downloads-list"><span class="muted">一覧を確認中…</span></div>
+    </section>
+  </div>
   <div class="key-overlay" id="key-overlay" hidden>
     <div class="key-card" role="dialog" aria-modal="true" aria-labelledby="key-heading">
       <div class="welcome-logo small">i</div>

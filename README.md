@@ -2,6 +2,8 @@
 
 ## ironasu Studio (offline Web UI)
 
+**New in v1.3: Model installation from the UI.** Click **「＋ モデルを追加」** to download models directly into LM Studio (native v1 model-management API) or Ollama (native Pull API), view download progress, inspect installed models, and explicitly load LM Studio models. No direct installation support is claimed for other backend families; see [モデルの直接インストール](docs/model-install.md).
+
 **Windowsのインストーラー（Python不要）とオフラインwheel配布に対応。** 詳細は [インストールと対応バックエンド](docs/install.md) を参照してください。`ironasu-studio` でLM Studio・Ollama等のローカルサーバーを自動検出して起動できます。
 
 LM Studio風の**オフライン起動可能なWeb UI**を同梱しています。`python -m ironasu` で起動して、ブラウザで **http://127.0.0.1:8765/ui** を開いてください。CDN、外部フォント、Node.jsは不要です。チャット、モデルルーティング、SSEストリーミング（上流対応時）、推論設定、実行メトリクスを利用できます。モデル推論にはローカルOpenAI互換バックエンドが別途必要です。詳しくは [オフラインWeb UIの使い方](docs/studio.md)。

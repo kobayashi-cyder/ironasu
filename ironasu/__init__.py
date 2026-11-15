@@ -15,7 +15,7 @@ from .speculative_state import (
     StateStore,
 )
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 __all__ = [
     "AdaptiveEngine", "Config", "HTTPBackend", "InferenceError",
     "AdaptiveSpeculationScheduler", "LayerSpec", "NgramDraftIndex",
