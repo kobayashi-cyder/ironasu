@@ -1,5 +1,49 @@
 # ironasu
 
+## Unified ironasu v1.0 (integrated package)
+
+The project now ships several independently tested capabilities in **one Python
+package**; they are not yet a single automatic GPU execution pipeline.
+
+| Component | Interface | Status |
+| --- | --- | --- |
+| Adaptive inference gateway | `python -m ironasu` or `ironasu` | Functional HTTP proxy (model backend required) |
+| Out-of-core / sparse MoE / Kimi text experiments | `ironasu-stream`, `ironasu-moe-plan`, `ironasu-kimi-inspect` | Experimental; opt-in dependencies / trusted local code |
+| Persistent coding-agent harness | `ironasu-harness` or `python -m ironasu.harness` | Functional, opt-in writes and tests; no OS sandbox |
+| Adaptive speculative draft scheduling | `ironasu.scheduling` | Standalone policy primitives; no target verifier |
+| Logical state reset and speculative initialization | `ironasu.speculative_state` | Standalone metadata primitive; NOT KV cache rollback |
+
+Install from the checkout with `python -m pip install -e .`. The gateway
+remains the default `ironasu` executable; harness is a separate command
+to avoid silently changing existing applications.
+
+Example (run the LLM upstream separately, then start gateway in terminal 1):
+
+```sh
+python -m ironasu
+```
+
+Run the harness in terminal 2 through the gateway, with a tool-calling-capable
+quality model available in the upstream:
+
+```sh
+ironasu-harness "Explain this repository" --workspace . --session demo --endpoint http://127.0.0.1:8765/v1
+```
+
+For direct backend use, omit the harness `--endpoint` override. The gateway
+routes tool calls to its upstream and does not cache tool-call responses.
+See [harness safety and usage](docs/HARNESS.md),
+[speculation scheduler](docs/scheduler-experiment.md), and
+[logical initialization](docs/speculative-initialization.md).
+
+**Correctness boundary:** candidate tokens from `NgramDraftIndex` are **not
+verified generations**. The scheduler is not wired to a target-model
+speculative verification kernel, CUDA memory transfers or a real AirLLM
+checkpoint loader; no hardware speedup is established. The logical state
+initializer does not restore KV caches or roll back file/tool side effects.
+Experimental model support may require custom architecture adaptations.
+
+
 **An adaptive compute-saving gateway for local code-assistant LLMs.**
 
 The original goal is to use huge models on low-memory hardware, inspired by AirLLM. That goal has two distinct limits:
