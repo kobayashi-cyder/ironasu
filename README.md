@@ -1,5 +1,10 @@
 # ironasu
 
+## ironasu Studio (offline Web UI)
+
+LM Studio風の**オフライン起動可能なWeb UI**を同梱しています。`python -m ironasu` で起動して、ブラウザで **http://127.0.0.1:8765/ui** を開いてください。CDN、外部フォント、Node.jsは不要です。チャット、モデルルーティング、SSEストリーミング（上流対応時）、推論設定、実行メトリクスを利用できます。モデル推論にはローカルOpenAI互換バックエンドが別途必要です。詳しくは [オフラインWeb UIの使い方](docs/studio.md)。
+
+
 ## v1.1 experimental runtime connection
 
 - **Verified greedy N-gram decoding** now has an opt-in `ironasu-stream --speculative-ngram` path. Candidate tokens are verified in a real paged target-model forward pass; rejected KV prefixes are cropped or invalidated and replayed. This is greedy-only, tested on a local tiny Qwen2, and **not** validated for Kimi K3.
