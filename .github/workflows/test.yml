@@ -20,6 +20,8 @@ jobs:
           ironasu-team --help
           ironasu-benchmark-ab --help
           ironasu-regression-gate --help
+          ironasu-benchmark-load --help
+          ironasu-load-gate --help
           ironasu-benchmark-capture --help
       - name: Run standard-library unit tests
         run: |
