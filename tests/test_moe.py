@@ -54,30 +54,34 @@ class InspectTests(unittest.TestCase):
 
 if torch is not None:
     class ToyMoEBlock(nn.Module):
-        def __init__(self):
+        def __init__(self, topk=1):
             super().__init__()
+            self.topk = topk
             self.router = nn.Linear(8, 4)
             self.mlp = nn.Module()
             self.mlp.experts = nn.ModuleList([nn.Sequential(nn.Linear(8, 16), nn.Tanh(),
                                                             nn.Linear(16, 8)) for _ in range(4)])
 
         def forward(self, x):
-            picks = self.router(x).argmax(dim=-1).reshape(-1)
+            scores, picks = self.router(x).reshape(-1, 4).topk(self.topk, dim=-1)
+            weights = torch.softmax(scores, dim=-1)
             x_flat = x.reshape(-1, x.shape[-1])
             y = torch.zeros_like(x_flat)
             for expert_id in picks.unique().tolist():
-                mask = picks == expert_id
+                selected = picks == expert_id
+                token_mask = selected.any(dim=-1)
+                coefficient = torch.where(selected, weights, 0).sum(dim=-1)[token_mask]
                 # Crucial: call Module via __call__ so pager hooks run.
-                y[mask] = self.mlp.experts[expert_id](x_flat[mask])
+                y[token_mask] += coefficient[:, None] * self.mlp.experts[expert_id](x_flat[token_mask])
             return y.reshape(x.shape)
 
 
     class ToyMoE(nn.Module):
-        def __init__(self):
+        def __init__(self, topk=1):
             super().__init__()
             self.model = nn.Module()
             self.model.embed_tokens = nn.Embedding(10, 8)
-            self.model.layers = nn.ModuleList([ToyMoEBlock()])
+            self.model.layers = nn.ModuleList([ToyMoEBlock(topk=topk)])
             self.model.norm = nn.LayerNorm(8)
             self.lm_head = nn.Linear(8, 10)
 
@@ -109,7 +113,7 @@ class MoEPagingTests(unittest.TestCase):
         self.source = ToyMoE().eval()
         with torch.no_grad():
             self.source.model.layers[0].router.weight.zero_()
-            self.source.model.layers[0].router.bias[:] = torch.tensor([8., -8., -8., -8.])
+            self.source.model.layers[0].router.bias[:] = torch.tensor([8., 4., -8., -9.])
         self.ids = torch.tensor([[2, 5, 6], [3, 4, 9]])
         save_file({k: v.detach().contiguous() for k, v in self.source.state_dict().items()},
                   Path(self.directory.name) / "model.safetensors")
@@ -156,6 +160,21 @@ class MoEPagingTests(unittest.TestCase):
         expert_keys = [k for call in self.index.calls for k in call if ".experts." in k]
         self.assertEqual(len(expert_keys), 4)
         self.assertEqual(pager.snapshot()["expert_paging"]["cache"]["occupied_bytes"], 0)
+
+    def test_top2_routes_only_the_two_necessary_experts(self):
+        src = ToyMoE(topk=2).eval()
+        src.load_state_dict(self.source.state_dict())
+        with torch.device("meta"):
+            meta = ToyMoE(topk=2).eval()
+        with LayerPager(meta, self.index, expert_paging=True) as pager:
+            with pager.session() as model:
+                result = model(self.ids)
+            torch.testing.assert_close(result, src(self.ids), atol=0, rtol=0)
+            self.assertEqual(pager.snapshot()["expert_paging"]["resident_experts"], 0)
+        expert_keys = [k for call in self.index.calls for k in call if ".experts." in k]
+        selected = {k.split(".experts.")[1].split(".")[0] for k in expert_keys}
+        self.assertEqual(selected, {"0", "1"})
+        self.assertEqual(len(expert_keys), 8)
 
     def test_all_experts_loaded_without_expert_paging(self):
         with LayerPager(self._meta(), self.index) as pager:
