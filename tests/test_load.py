@@ -20,7 +20,7 @@ def fixture(*, mismatch=False, usage=True):
         return Completion(prompt if mismatch else prompt.upper(), 0.005,
                           8 if usage else None)
     result = compare_load(
-        ["SECRET prompt", "another"], baseline=baseline, candidate=candidate,
+        ["SECRET prompt", "another", "third", "fourth"], baseline=baseline, candidate=candidate,
         concurrencies=(1, 4), repeats=2, warmup=0)
     # Normalize the fake candidate's batch timing for deterministic gate tests.
     # Actual overlap and wall-clock measurement are exercised separately.
@@ -119,6 +119,9 @@ class ConcurrentLoadTests(unittest.TestCase):
                              concurrencies=levels, warmup=0)
         with self.assertRaises(ValueError):
             compare_load([], baseline=fake, candidate=fake, warmup=0)
+        with self.assertRaises(ValueError):
+            compare_load(["one", "two"], baseline=fake, candidate=fake,
+                         concurrencies=(4,), warmup=0)
         with self.assertRaises(ValueError):
             evaluate_load({"prompts": 1})
         with self.assertRaises(ValueError):
