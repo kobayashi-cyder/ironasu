@@ -29,3 +29,4 @@ ironasu-quantize-q4 = "ironasu.q4:main"
 ironasu-benchmark-q4 = "ironasu.q4_benchmark:main"
 
 ironasu-moe-plan = "ironasu.moe:main"
+ironasu-benchmark-runtime = "ironasu.benchmark_runtime:main"
