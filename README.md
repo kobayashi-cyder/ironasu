@@ -6,6 +6,13 @@
 - **16-session DAG team scheduler** via `ironasu-team --tasks tasks.json --workers 16 --model-slots 2` supports shared briefs, dependency summaries, bounded model calls and independent persistent read-only sessions. This does not share attention/KV state between agents.
 - **A/B benchmark** via `ironasu-benchmark-ab` reports exact response parity, p50/p95, and tokens/s where available for two servers with the same target model. No 3T/70B hardware result is asserted.
 
+**New: fail-closed performance regression gate.** Run `ironasu-benchmark-ab` against
+baseline and candidate inference servers, then `ironasu-regression-gate ab.json`
+to reject output mismatches, insufficient samples, p95 latency regression or
+sequential tokens/s regression. Speculative cycle timing now includes draft
+lookup and scheduler overhead rather than only target execution. See
+[measurement commands and limitations](docs/performance-regression.md).
+
 See [implementation and validation](docs/runtime-validation.md). The
 production out-of-core performance, optimized CUDA weight prefetch, and
 architecture-specific Kimi KV handling still require real-device integration.
