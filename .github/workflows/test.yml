@@ -48,6 +48,31 @@ jobs:
               assert b"https://" not in wheel.read("ironasu/web/ui.js")
           print("Offline Studio assets are packaged without external runtime dependencies.")
           PY
+  native-desktop-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install native Tk and virtual display
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb python3-tk
+          python -m pip install -e .
+      - name: Construct all three native Tk tabs under Xvfb
+        run: |
+          xvfb-run -a python -m ironasu.desktop --smoke-gui /tmp/ironasu-native-ui.json
+          python - <<'PY'
+          import json
+          report = json.load(open('/tmp/ironasu-native-ui.json', encoding='utf-8'))
+          assert report['native_window_created'] is True, report
+          assert report['agents_max'] == 16, report
+          assert report['corpus_partitions'] == [4, 16], report
+          assert len(report['tabs']) == 3, report
+          print(report)
+          PY
   stream-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 25
