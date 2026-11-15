@@ -1,0 +1,111 @@
+name: Installable offline Studio packages
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - "ironasu/**"
+      - "build/**"
+      - "scripts/**"
+      - "pyproject.toml"
+      - ".github/workflows/windows-installer.yml"
+  pull_request:
+    paths:
+      - "ironasu/**"
+      - "build/**"
+      - "scripts/**"
+      - "pyproject.toml"
+      - ".github/workflows/windows-installer.yml"
+permissions:
+  contents: read
+jobs:
+  wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build universal wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build --wheel --outdir dist/wheels
+      - name: Offline install wheel in empty venv
+        run: |
+          python -m venv /tmp/ironasu-clean
+          /tmp/ironasu-clean/bin/python -m pip install --no-index --no-deps dist/wheels/*.whl
+          /tmp/ironasu-clean/bin/ironasu-studio --help
+          cd /tmp
+          /tmp/ironasu-clean/bin/python -c "from importlib.resources import files; assert files('ironasu.web').joinpath('index.html').is_file()"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ironasu-studio-offline-python-wheel
+          path: dist/wheels/*.whl
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: x64
+      - name: Install build tools
+        run: python -m pip install -e . pyinstaller
+      - name: Build portable standalone app (bundled Python + offline UI)
+        run: >-
+          python -m PyInstaller --noconfirm --clean --onedir
+          --name ironasu-studio --collect-data ironasu.web
+          scripts/ironasu_studio_entry.py
+      - name: Smoke-test standalone app without a model server
+        shell: pwsh
+        run: |
+          & ".\dist\ironasu-studio\ironasu-studio.exe" --help
+          if ($LASTEXITCODE -ne 0) { throw "CLI launch failed" }
+          $proc = Start-Process -FilePath ".\dist\ironasu-studio\ironasu-studio.exe" -ArgumentList @("--no-browser", "--provider", "lmstudio", "--port", "19876") -PassThru
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 30; $i++) {
+              Start-Sleep -Seconds 1
+              try {
+                $response = Invoke-WebRequest -Uri "http://127.0.0.1:19876/ui" -TimeoutSec 2 -UseBasicParsing
+                if ($response.StatusCode -eq 200 -and $response.Content -match "ironasu") {
+                  $ready = $true
+                  break
+                }
+              } catch { }
+            }
+            if (-not $ready) { throw "Standalone offline UI did not start" }
+          } finally {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          }
+      - name: Package portable ZIP
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "dist\installers" | Out-Null
+          Compress-Archive -Path "dist\ironasu-studio\*" -DestinationPath "dist\installers\ironasu-studio-1.2.0-windows-x64-portable.zip" -Force
+      - name: Build offline Windows setup
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --yes --no-progress
+          }
+          if (-not (Test-Path $iscc)) { throw "Inno Setup compiler not found" }
+          & $iscc "build\windows\ironasu-studio.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Installer compilation failed" }
+      - name: Verify unattended per-user installation
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem "dist\installers\*-setup.exe" | Select-Object -First 1).FullName
+          $p = Start-Process -FilePath $setup -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "Setup exit code $($p.ExitCode)" }
+          $installed = Join-Path $env:LOCALAPPDATA "Programs\ironasu Studio\ironasu-studio.exe"
+          if (-not (Test-Path $installed)) { throw "Installed executable not found" }
+          & $installed --help
+          if ($LASTEXITCODE -ne 0) { throw "Installed app failed to launch" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ironasu-studio-windows-x64-offline-installers
+          path: dist/installers/*
+          if-no-files-found: error
