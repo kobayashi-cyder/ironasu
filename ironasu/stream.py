@@ -75,11 +75,27 @@ def main() -> None:
                         help="pin up to this many MiB of selected checkpoint tensors in CPU RAM; 0 disables")
     parser.add_argument("--pin-stage", action="append", default=None,
                         help="cache only this stage (repeatable); e.g. lm_head, model.embed_tokens")
+    parser.add_argument("--auto-tune", action="store_true",
+                        help="opt-in: compare paging strategies on a short same-prompt trial before generating")
+    parser.add_argument("--tune-tokens", type=int, default=2,
+                        help="tokens per trial (default: 2; each candidate regenerates them)")
+    parser.add_argument("--tune-repeats", type=int, default=2,
+                        help="per-strategy repetitions, 1..10 (default 2)")
     args = parser.parse_args()
+    selected = {"prefetch": args.prefetch, "cpu_cache_mb": args.cpu_cache_mb,
+                "pin_stages": args.pin_stage}
+    if args.auto_tune:
+        if args.pin_stage is not None or args.prefetch:
+            parser.error("--auto-tune cannot be combined with manually selected --pin-stage/--prefetch")
+        from .tuner import tune_local_model
+        report = tune_local_model(args.model_dir, args.prompt, device=args.device,
+                                  tokens=args.tune_tokens, cache_mb=args.cpu_cache_mb,
+                                  repeats=args.tune_repeats)
+        selected = report["selected_arguments"]
+        print(json.dumps({"ironasu_compass": report}, indent=2, ensure_ascii=False))
     engine = PagedCausalLM.from_local_dir(
         args.model_dir, device=args.device, sync_timing=args.profile,
-        prefetch=args.prefetch, cpu_cache_mb=args.cpu_cache_mb,
-        pin_stages=args.pin_stage,
+        **selected,
     )
     try:
         print(engine.generate(args.prompt, max_new_tokens=args.tokens))

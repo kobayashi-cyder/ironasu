@@ -285,16 +285,37 @@ correctness and cache hits. Optional CI integration generates tiny GPT-2 and
 Qwen2 models locally and verifies greedy multi-token parity, but full-size Qwen,
 70B, MoE, FP8, CUDA and the target ASUS remain unverified.
 
+## v0.5: **IroNasu Compass — 測る・選ぶ・守る・戻す**
 
-### Estimate the memory cost before loading a huge model
+ironasuはAirLLMの単なる模倣ではありません。「大きいモデルを動かす」だけでなく、
+**どこが遅いかを測り、実際に改善する設定だけを選ぶ**ための実験装置です。
+
+1. **測る** — 同じプロンプト・同じトークン数で、基準・先読み・固定キャッシュ・両方を実測する。
+2. **選ぶ** — ベースラインのレイヤー計測から、CPUキャッシュに固定する候補を提案して試す。
+3. **守る** — 出力の一致を確認し、最低改善率（既定10%）を満たさない候補は不採用にする。
+4. **戻す** — エラー・応答不一致・基準結果の不安定化では、ベースラインを選択する。
+
+開始時の自動チューニングは**明示的なオプトイン**であり、モデルやチェックポイントを書き換えません。
 
 ```bash
-python -m ironasu.checkpoint ./models/qwen2-local --cpu-cache-mb 2048
-# or after installation: ironasu-inspect ./models/qwen2-local --cpu-cache-mb 2048
+# メモリ追加なしで安全側の比較: 先読みON/OFF、各2回＋ベースライン再測定
+ironasu-tune ./models/my-model --device cpu --tokens 2 --repeats 2
+
+# CPUキャッシュ最大512 MiBで4〜5候補を比較（追加RAMが必要）
+ironasu-tune ./models/my-model --device cpu --cache-mb 512 \
+  --prompt 'Explain the purpose of the function.' --tokens 2 --repeats 2 \
+  --output evidence.json
+
+# 自動選択した候補で生成まで行う（毎回チューニングするため重い）
+ironasu-stream ./models/my-model --device cpu --prompt 'Review this code' \
+  --tokens 8 --cpu-cache-mb 512 --auto-tune
 ```
 
-The inspector reads only safetensors headers, reports checkpoint disk bytes,
-weight payload bytes, per-stage sizes and a *provisional* fixed-cache plan.
-It cannot measure peak process RSS, KV cache, prefetch staging, CUDA memory,
-or actual wall time. Unrecognized checkpoint keys are reported, not silently
-claimed to be supported.
+**評価の限界と注意**：文字列の出力一致は一つの入力での確認であって、意味的正しさ・
+全入力での精度・ロジット一致を保証しません。OSのページキャッシュ、熱制御、GPUの非同期
+計算、バックグラウンド負荷により計測が偏る場合があります。GPUでは同期プロファイリングを
+有効にして試験します。容量制限を超えてRAMを使わない保証でもありません。CLIは実機の
+計算能力を検証するものではなく、70Bなどに対する高速化を断定するものでもありません。
+`ironasu-tune` は各候補ごとにモデルを初期化して推論します。巨大モデルでは試験そのものが
+非常に長くなります。なお、この実装はモデルのFLOPsを直接削減せず、先読みや重み再利用の
+候補を試すものです。品質評価には別途コードテストが必要です。
