@@ -20,9 +20,9 @@ Python 3.10+; harness itself uses only Python standard library.
 python -m unittest discover -s tests -v
 export IRONASU_BACKEND_URL=http://127.0.0.1:8080/v1
 export IRONASU_QUALITY_MODEL=qwen2.5-coder-7b
-python -m ironasu "Explain this repository" --workspace . --session demo
-python -m ironasu "Fix the test failures" --workspace . --session demo --allow-writes --allow-tests
-python -m ironasu --workspace . --session demo --resume --allow-writes --allow-tests
+ironasu-harness "Explain this repository" --workspace . --session demo
+ironasu-harness "Fix the test failures" --workspace . --session demo --allow-writes --allow-tests
+ironasu-harness --workspace . --session demo --resume --allow-writes --allow-tests
 ```
 
 Models must support OpenAI-style structured tool calls. No model is downloaded or started by ironasu. The optional upstream key is `IRONASU_BACKEND_KEY`.
@@ -34,7 +34,7 @@ Models must support OpenAI-style structured tool calls. No model is downloaded o
 After a failure, run `--resume` for the same workspace and session. If a tool call is marked `UNCERTAIN`, inspect the filesystem and decide its actual outcome. Then explicitly record the verified result and resume:
 
 ```bash
-python -m ironasu --workspace . --session demo --resolve-call CALL_ID \
+ironasu-harness --workspace . --session demo --resolve-call CALL_ID \
   --resolve-result "Verified: the file was written and checked" --allow-writes
 ```
 
@@ -46,6 +46,6 @@ The harness does **not** automatically replay started tools; operator resolution
 - No desktop/browser control, images, audio, messaging integrations, or native MCP
 - No real execution sandbox, fine-grained interactive approval UI, or credential broker
 - No subagents, team scheduling, task queues, or multi-model cost/rate accounting
-- No model backend, AirLLM runtime, GPU offload, streaming server, or speculative decoding
+- No bundled model backend, direct integration with the experimental out-of-core GPU offload, streaming tool protocol, or verified speculative decoding
 
-The older README outlined a planned LLM inference proxy; its adaptive caching/routing server has not yet been implemented in the repository. The harness can connect to a compatible backend independently and can later connect to an ironasu proxy.
+The integrated repository also contains an adaptive inference HTTP proxy. The harness can use that proxy through `--endpoint http://127.0.0.1:8765/v1`, but its tools and SQLite journal are independent of the proxy. The server does not provide GPU-side speculative token verification.
