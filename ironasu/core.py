@@ -27,6 +27,7 @@ class Config:
     fast_model: str = "qwen2.5-coder-1.5b"
     quality_model: str = "qwen2.5-coder-7b"
     max_concurrency: int = 2
+    max_waiting_requests: int = 32
     queue_timeout_s: float = 10.0
     request_timeout_s: float = 600.0
     slow_request_s: float = 20.0
@@ -45,6 +46,7 @@ class Config:
             fast_model=e.get("IRONASU_FAST_MODEL", cls.fast_model),
             quality_model=e.get("IRONASU_QUALITY_MODEL", cls.quality_model),
             max_concurrency=int(e.get("IRONASU_MAX_CONCURRENCY", 2)),
+            max_waiting_requests=int(e.get("IRONASU_MAX_WAITING_REQUESTS", 32)),
             queue_timeout_s=float(e.get("IRONASU_QUEUE_TIMEOUT_S", 10)),
             request_timeout_s=float(e.get("IRONASU_REQUEST_TIMEOUT_S", 600)),
             slow_request_s=float(e.get("IRONASU_SLOW_REQUEST_S", 20)),
@@ -58,6 +60,9 @@ class Config:
     def validate(self) -> None:
         if not (self.backend_url.startswith("http://") or self.backend_url.startswith("https://")):
             raise ValueError("backend URL must be http(s)")
+        if (type(self.max_waiting_requests) is not int or
+                not 0 <= self.max_waiting_requests <= 1024):
+            raise ValueError("max_waiting_requests must be in [0, 1024]")
         if min(self.max_concurrency, self.cache_entries) < 1 or min(
             self.queue_timeout_s, self.request_timeout_s, self.slow_request_s, self.cache_ttl_s
         ) <= 0:
@@ -134,6 +139,10 @@ class Metrics:
         self.singleflight_hits = 0
         self.overloads = 0
         self.errors = 0
+        self.active_requests = 0
+        self.waiting_requests = 0
+        self.peak_active_requests = 0
+        self.peak_waiting_requests = 0
         self.latency = defaultdict(lambda: deque(maxlen=32))
         self.queue_wait = deque(maxlen=32)
         self.pressure = False
@@ -155,6 +164,16 @@ class Metrics:
                     self.pressure = False
                     self._recovery = 0
 
+    def adjust_admission(self, *, active_delta: int = 0, waiting_delta: int = 0) -> None:
+        """Track bounded active/queued requests without storing request content."""
+        with self._lock:
+            self.active_requests += active_delta
+            self.waiting_requests += waiting_delta
+            if self.active_requests < 0 or self.waiting_requests < 0:
+                raise RuntimeError("admission accounting underflow")
+            self.peak_active_requests = max(self.peak_active_requests, self.active_requests)
+            self.peak_waiting_requests = max(self.peak_waiting_requests, self.waiting_requests)
+
     def bump(self, name: str) -> None:
         with self._lock:
             setattr(self, name, getattr(self, name) + 1)
@@ -170,6 +189,10 @@ class Metrics:
                 "cache_hits": self.cache_hits,
                 "singleflight_hits": self.singleflight_hits,
                 "overloads": self.overloads,
+                "active_requests": self.active_requests,
+                "waiting_requests": self.waiting_requests,
+                "peak_active_requests": self.peak_active_requests,
+                "peak_waiting_requests": self.peak_waiting_requests,
                 "errors": self.errors,
                 "pressure": self.pressure,
                 "latency_seconds": {k: list(v) for k, v in self.latency.items()},
@@ -204,6 +227,9 @@ class AdaptiveEngine:
         self.cache = ExactCache(config.cache_entries, config.cache_ttl_s)
         self.metrics = Metrics(config.slow_request_s)
         self._slots = threading.BoundedSemaphore(config.max_concurrency)
+        # Includes both queued upstream calls and singleflight followers.
+        # ThreadingHTTPServer has unbounded threads; reject waiting work early.
+        self._waiters = threading.BoundedSemaphore(config.max_waiting_requests)
         self._flight_lock = threading.Lock()
         self._inflight: dict[str, tuple[threading.Event, dict[str, Any]]] = {}
         self._context_lock = threading.Lock()
@@ -268,12 +294,18 @@ class AdaptiveEngine:
                     self._inflight[key] = (event, holder)
                     follower = False
             if follower:
-                self.metrics.bump("singleflight_hits")
-                if not event.wait(self.config.request_timeout_s + self.config.queue_timeout_s):
-                    raise InferenceError("identical upstream request timed out", 504)
-                if "error" in holder:
-                    raise holder["error"]
-                return self._annotate(holder["result"], route, "singleflight", context_report)
+                # Followers also occupy a waiting thread; enforce the same cap
+                # used for upstream queueing to prevent unbounded singleflight waiters.
+                self._reserve_waiter()
+                try:
+                    self.metrics.bump("singleflight_hits")
+                    if not event.wait(self.config.request_timeout_s + self.config.queue_timeout_s):
+                        raise InferenceError("identical upstream request timed out", 504)
+                    if "error" in holder:
+                        raise holder["error"]
+                    return self._annotate(holder["result"], route, "singleflight", context_report)
+                finally:
+                    self._release_waiter()
         try:
             result = self._invoke(request, route)
             if key:
@@ -290,13 +322,31 @@ class AdaptiveEngine:
                     self._inflight.pop(key, None)
                     event.set()
 
+    def _reserve_waiter(self) -> None:
+        if not self._waiters.acquire(blocking=False):
+            self.metrics.bump("overloads")
+            raise InferenceError("queue is saturated; retry later", 503)
+        self.metrics.adjust_admission(waiting_delta=1)
+
+    def _release_waiter(self) -> None:
+        self.metrics.adjust_admission(waiting_delta=-1)
+        self._waiters.release()
+
     def _invoke(self, request: dict[str, Any], route: str) -> dict[str, Any]:
         queued = time.perf_counter()
-        acquired = self._slots.acquire(timeout=self.config.queue_timeout_s)
+        # Do not consume queue capacity when an execution slot is already free.
+        acquired = self._slots.acquire(blocking=False)
+        if not acquired:
+            self._reserve_waiter()
+            try:
+                acquired = self._slots.acquire(timeout=self.config.queue_timeout_s)
+            finally:
+                self._release_waiter()
         wait_s = time.perf_counter() - queued
         if not acquired:
             self.metrics.bump("overloads")
             raise InferenceError("queue is saturated; retry later", 503)
+        self.metrics.adjust_admission(active_delta=1)
         started = time.perf_counter()
         failed = False
         try:
@@ -306,6 +356,7 @@ class AdaptiveEngine:
             raise
         finally:
             self.metrics.record(route, time.perf_counter() - started, wait_s, failed)
+            self.metrics.adjust_admission(active_delta=-1)
             self._slots.release()
 
     @staticmethod
