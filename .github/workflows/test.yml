@@ -27,6 +27,7 @@ jobs:
         run: |
           python -m unittest discover -s tests -v
           python -m compileall -q ironasu tests
+          node --check ironasu/web/ui.js
       - name: Check bundled offline Studio assets in wheel
         run: |
           python -m pip wheel . --no-deps --wheel-dir dist
