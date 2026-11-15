@@ -62,6 +62,13 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(backend.calls[1][-1]["role"], "tool")
         self.assertEqual(agent.store.event("one", "id1")[0], "done")
 
+    def test_resume_completed_does_not_call_backend(self):
+        first = Harness(self.s, FakeBackend([{"content": "complete"}]))
+        self.assertEqual(first.run("finished", "task"), "complete")
+        another = FakeBackend([])
+        self.assertEqual(Harness(self.s, another).run("finished", None, resume=True), "complete")
+        self.assertEqual(another.calls, [])
+
     def test_persistent_resume(self):
         backend = FakeBackend([{"content": None, "tool_calls": [call("r1", "read_file", {"path": "src/nope"})]}])
         agent = Harness(Settings(workspace=self.root, max_steps=1), backend)
