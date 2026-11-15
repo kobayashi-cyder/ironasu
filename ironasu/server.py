@@ -36,7 +36,7 @@ def serve(config: Config | None = None) -> None:
             elif self.path == "/health":
                 self._send(200, {"status": "ok"})
             elif self.path == "/metrics":
-                self._send(200, engine.metrics.snapshot())
+                self._send(200, engine.diagnostic_snapshot())
             else:
                 self._send(404, {"error": {"message": "not found"}})
 

@@ -11,6 +11,7 @@ import time
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from .context import select_code
 
 
 class InferenceError(Exception):
@@ -205,6 +206,8 @@ class AdaptiveEngine:
         self._slots = threading.BoundedSemaphore(config.max_concurrency)
         self._flight_lock = threading.Lock()
         self._inflight: dict[str, tuple[threading.Event, dict[str, Any]]] = {}
+        self._context_lock = threading.Lock()
+        self._context_stats = {"requests": 0, "original_source_chars": 0, "selected_source_chars": 0}
 
     def complete(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
@@ -222,6 +225,27 @@ class AdaptiveEngine:
         request = {k: v for k, v in payload.items() if not k.startswith("x_ironasu_")}
         request["model"] = model
         request.pop("stream", None)
+        context_report = None
+        if "x_ironasu_files" in payload:
+            user_positions = [idx for idx, item in enumerate(messages)
+                              if item.get("role") == "user"]
+            if not user_positions or not isinstance(messages[user_positions[-1]].get("content"), str):
+                raise InferenceError("code retrieval requires a text user message", 400)
+            index = user_positions[-1]
+            try:
+                selected = select_code(
+                    payload["x_ironasu_files"], messages[index]["content"],
+                    payload.get("x_ironasu_context_chars", 12000),
+                )
+            except ValueError as exc:
+                raise InferenceError(str(exc), 400) from exc
+            request["messages"] = [dict(item) for item in messages]
+            request["messages"][index]["content"] += "\n\n" + selected.text
+            context_report = selected.report()
+            with self._context_lock:
+                self._context_stats["requests"] += 1
+                self._context_stats["original_source_chars"] += selected.original_chars
+                self._context_stats["selected_source_chars"] += selected.selected_chars
         # No caching for tools, nondeterministic requests, or explicit opt-out.
         cacheable = (
             payload.get("x_ironasu_cache", True) is True
@@ -234,7 +258,7 @@ class AdaptiveEngine:
             cached = self.cache.get(key)
             if cached is not None:
                 self.metrics.bump("cache_hits")
-                return self._annotate(cached, route, "cache")
+                return self._annotate(cached, route, "cache", context_report)
             with self._flight_lock:
                 if key in self._inflight:
                     event, holder = self._inflight[key]
@@ -249,13 +273,13 @@ class AdaptiveEngine:
                     raise InferenceError("identical upstream request timed out", 504)
                 if "error" in holder:
                     raise holder["error"]
-                return self._annotate(holder["result"], route, "singleflight")
+                return self._annotate(holder["result"], route, "singleflight", context_report)
         try:
             result = self._invoke(request, route)
             if key:
                 self.cache.put(key, result)
                 holder["result"] = result
-            return self._annotate(result, route, "upstream")
+            return self._annotate(result, route, "upstream", context_report)
         except Exception as exc:
             if key:
                 holder["error"] = exc
@@ -285,5 +309,15 @@ class AdaptiveEngine:
             self._slots.release()
 
     @staticmethod
-    def _annotate(result: dict[str, Any], route: str, source: str) -> dict[str, Any]:
-        return {**result, "_ironasu": {"route": route, "source": source}}
+    def _annotate(result: dict[str, Any], route: str, source: str, context: dict | None = None) -> dict[str, Any]:
+        metadata = {"route": route, "source": source}
+        if context is not None:
+            metadata["context_retrieval"] = context
+        return {**result, "_ironasu": metadata}
+
+    def diagnostic_snapshot(self) -> dict[str, Any]:
+        snapshot = self.metrics.snapshot()
+        with self._context_lock:
+            snapshot["context_retrieval"] = dict(self._context_stats)
+        return snapshot
+

@@ -89,3 +89,74 @@ The first easy win is skipping entire duplicate calls (exactly one avoided invoc
 - Streaming SSE and comprehensive tool-call behavior before production VS Code integration.
 
 License: MIT (add license text when distributing publicly).
+
+## v0.2: Code-context pruning + AirLLM measurements (experimental)
+
+v0.2 adds **opt-in reduction of prompt context** and **a real AirLLM benchmark harness**. It does **not** replace AirLLM, perform model-layer skipping, guarantee quality, or claim to reduce the FLOPs needed for a dense output-token forward pass. The earlier v0.1 behaviors and their tests remain intact.
+
+### Save prompt-prefill work on coding tasks
+
+Pass a list of source files as `x_ironasu_files` (array of `{ "path": "...", "content": "..." }`), and optionally `x_ironasu_context_chars` (1000–100000, default 12000). The proxy finds 32-line windows with the most overlapping *literal identifiers* with the last user question, and sends only those excerpts to the configured model. This is an **approximate lexical retrieval heuristic**, not semantic search or dependency analysis; it may omit relevant code. **It is never enabled implicitly**. Disable it for correctness-sensitive multi-file changes until tested.
+
+Example request body (send to `/v1/chat/completions`):
+
+```json
+{
+  "messages": [{"role": "user", "content": "Explain validate_user"}],
+  "temperature": 0,
+  "x_ironasu_files": [
+    {"path": "src/auth.py", "content": "def validate_user(token):\n    return verify_signature(token)\n"},
+    {"path": "src/other.py", "content": "def unrelated():\n    return 1\n"}
+  ],
+  "x_ironasu_context_chars": 2000
+}
+```
+
+The returned `_ironasu.context_retrieval` includes original and selected **source character counts**; those are not tokens or FLOPs. `/metrics` adds aggregated character counts. Private code remains on your machine unless the explicitly configured upstream backend is remote. For manual preview against your own local repository (no inference request):
+
+```bash
+python -m ironasu.context_cli --repo . --query 'fix validate_user in auth.py' --budget-chars 4000
+```
+
+The collector skips hidden files, common vendor directories and symlinks, limits file sizes, and only includes known text-source extensions. The proxy itself **never reads repository files**; you decide what to send.
+
+### Benchmark AirLLM on the actual hardware
+
+Install compatible AirLLM, PyTorch, and model dependencies in a separate environment. AirLLM models may require large downloads and disk space for layer sharding; benchmark a small model first.
+
+```bash
+python -m ironasu.airllm_benchmark \
+  --model Qwen/Qwen3-4B --device cpu --max-new-tokens 8 \
+  --prefetch both --output airllm-results.json
+```
+
+The benchmark records model load time, generation time, output tokens, Linux process block-read bytes (when available), optional CUDA peak allocated bytes, and best-effort timing of AirLLM's shard load/decode and device materialization methods. It compares prefetch ON/OFF **only if the generated token IDs match and effective prefetch states differ**. If `compression` disables prefetching in the installed AirLLM, no prefetch speedup is reported.
+
+**Important limitations:** disk cache warms during the first run and influences the second, GPU work is asynchronous, and the method probes depend on AirLLM's internal names. Stage totals can overlap and must not be interpreted as percentages of wall time or GPU FLOPs. The script never auto-activates a slower or quality-changing alternative. Repeat with reversed prefetch order to validate speedups; no actual performance measurements from the ASUS are included here.
+
+### Diagnose measured stages
+
+Save a trace JSON (from trusted measurements of a *single* inference interval):
+
+```json
+{
+  "wall_seconds": 10.0,
+  "events": [
+    {"stage": "disk_io", "seconds": 6.5},
+    {"stage": "compute", "seconds": 2.1},
+    {"stage": "transfer", "seconds": 0.9}
+  ]
+}
+```
+
+Then:
+
+```bash
+python -m ironasu.diagnostics trace.json
+```
+
+A stage is identified as a bottleneck when its observed duration is at least 40% of wall time; otherwise the diagnosis says `unresolved`. Possible stages are `disk_io`, `transfer`, `compute`, `prefill`, `queue`, `other`. AirLLM's probe outputs separate best-effort categories named `disk_io_plus_decode` and `transfer_plus_setup`; **they must not be naively converted to exact GPU compute time**. Use external tooling (such as a CUDA profiler or measured token-prefill timings) for the missing phases.
+
+### Evaluation gate before enabling globally
+
+Test with a stable set of coding prompts and projects. Compare baseline vs reduced context on actual compiled/tested results, not just answer similarity. Report original/selected token counts from the backend, correctness, p50/p95 latency, stage times, I/O bytes and peak RAM/VRAM. Revert the optimization if correctness regresses. In this repository's tests, the context-selection logic is exercised with fixtures, **not a running 70B model**.

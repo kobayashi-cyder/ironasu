@@ -4,10 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ironasu"
-version = "0.1.0"
-description = "Adaptive compute-saving router for local OpenAI-compatible LLM inference"
+version = "0.2.0"
+description = "Measured local LLM gateway with opt-in code-context reduction and AirLLM benchmarks"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 
 [tool.setuptools.packages.find]
 include = ["ironasu*"]
+
+[project.scripts]
+ironasu = "ironasu.server:serve"
+ironasu-context = "ironasu.context_cli:main"
+ironasu-diagnose = "ironasu.diagnostics:main"
+ironasu-benchmark-airllm = "ironasu.airllm_benchmark:main"
