@@ -160,3 +160,77 @@ A stage is identified as a bottleneck when its observed duration is at least 40%
 ### Evaluation gate before enabling globally
 
 Test with a stable set of coding prompts and projects. Compare baseline vs reduced context on actual compiled/tested results, not just answer similarity. Report original/selected token counts from the backend, correctness, p50/p95 latency, stage times, I/O bytes and peak RAM/VRAM. Revert the optimization if correctness regresses. In this repository's tests, the context-selection logic is exercised with fixtures, **not a running 70B model**.
+
+## v0.3: Experimental native out-of-core inference (AirLLM-style)
+
+**Scope:** Unlike the earlier proxy and AirLLM benchmarking wrapper, this contains
+an **independent layer-streaming implementation** (`ironasu.paging`). For a trusted
+**local** Hugging Face `safetensors` checkpoint, it constructs a Transformers model
+with parameters on the `meta` device, then uses forward hooks to load the
+embedding, individual decoder blocks, final norm and output head from SSD **one
+module at a time**. Each module's weights are returned to `meta` immediately after
+its forward pass. Original checkpoint shards are indexed in place, without a
+second layer-shard copy. Optional one-stage CPU prefetch trades extra RAM for
+potential I/O overlap; disabled by default.
+
+This is a **limited reference implementation**, **not** AirLLM v4 feature parity.
+The package does **not** copy AirLLM source code; see its Apache-2.0 original at
+https://github.com/lyogavin/airllm . A dense model still executes all decoder
+layers for each generated token. CPU offload is not CPU FLOPs reduction.
+
+### Installation and use
+
+```bash
+python -m pip install -e '.[stream]'
+# Download an openly licensed safetensors model separately using a trusted source,
+# e.g. `hf download <HF-ID> --local-dir ./models/model-name`.
+python -m ironasu.stream ./models/model-name \
+  --prompt 'Write a Python binary search function.' --tokens 8 --device cpu
+# CUDA (only if an NVIDIA CUDA runtime and driver are available):
+python -m ironasu.stream ./models/model-name \
+  --prompt 'Write a Python binary search function.' --tokens 8 --device cuda --profile
+# Bounded CPU prefetch, extra RAM required:
+python -m ironasu.stream ./models/model-name \
+  --prompt 'Explain Python generators.' --tokens 4 --prefetch
+```
+
+`ironasu-stream` is the equivalent console entrypoint. `--profile` synchronizes
+CUDA kernels to obtain more meaningful stage timings, at a performance cost.
+The normal `ironasu` command still runs the separate OpenAI-compatible **proxy**;
+the paged model is not yet exposed through its HTTP API.
+
+**Supported in this version:** `model.layers` (Llama/Qwen2-style dense decoder),
+`transformer.h` (GPT-2 style), and `gpt_neox.layers` (GPT-NeoX style), **subject to
+checkpoint-layout checks**. Untied and tied embedding/head checkpoints are handled.
+PyTorch forward parity is tested on a tiny locally generated model. There is no
+claim that all real pretrained model versions or full generation paths have been
+validated on the target ASUS hardware.
+
+**Not supported:** automatic HF model downloads, pickle `.bin` weights, arbitrary
+remote model Python code, quantized GGUF/FP8/MXFP4 or MoE weight dispatch, 4/8-bit
+checkpoint recompression, GPU-specific kernels, streamed LoRA fine-tuning,
+multimodal models, AirLLM's many vendor-specific architectures, or production
+concurrency/streaming HTTP serving. Models with parameters outside recognized
+stages fail closed instead of silently returning incorrect predictions.
+
+**Memory caveats:** Although all *model weights* need not be resident at once,
+peak memory still depends on the **largest layer**, current layer's disk tensors,
+activation and **KV caches**, PyTorch overhead and (when enabled) one prefetched
+layer. Model files must fit on disk; weights are not automatically deleted.
+Model and code must be from a trusted source. For safer operation, local-only,
+`trust_remote_code=False` is the default and remote checkpoints cannot be fetched.
+
+### Correctness and bottleneck measurement
+
+```bash
+python -m unittest discover -s tests -v
+python -m ironasu.diagnostics results.json
+```
+
+The pager reports per-module `disk_seconds`, `transfer_seconds`, `compute_seconds`,
+load count, and peak simultaneous loaded stages. Disk timing includes OS page-cache
+behavior and deserialization; when GPU synchronization is disabled compute timing
+mostly covers enqueue and host bookkeeping. **No throughput improvement or FLOPs
+saving is claimed until measured against a matching baseline and checked for
+correct outputs**. The optional HF smoke test builds a tiny model locally without
+network downloads; it runs only when `transformers` and `accelerate` are installed.
