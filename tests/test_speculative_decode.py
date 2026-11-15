@@ -1,5 +1,6 @@
 """Greedy target parity and safe speculative verification contracts."""
 import unittest
+import time
 from types import SimpleNamespace
 
 from ironasu.speculative_decode import (
@@ -145,6 +146,24 @@ class VerifiedSpeculationTests(unittest.TestCase):
                                      index=NgramDraftIndex(order=2, max_draft=4))
         r = d.generate((1, 2, 1, 2), max_new_tokens=10, eos_token_ids=(2,))
         self.assertEqual(r.new_tokens, (1, 2))
+
+    def test_speculative_cycle_includes_draft_lookup_cost(self):
+        class SlowIndex:
+            order = 1
+            max_draft = 1
+            def remember(self, history):
+                pass
+            def propose(self, history, count):
+                time.sleep(0.03)
+                return (transition(history[-1]),) if count else ()
+
+        scheduler = AdaptiveSpeculationScheduler(
+            draft_lengths=(1,), min_samples=1, explore_every=1)
+        decoder = GreedySpeculativeDecoder(target, scheduler=scheduler, index=SlowIndex())
+        result = decoder.generate((1,), max_new_tokens=3)
+        self.assertEqual(result.new_tokens, baseline((1,), 3))
+        self.assertEqual(result.proposed_draft_tokens, 1)
+        self.assertGreater(result.speculative_policy["spec_seconds_per_token"][1], 0.01)
 
     def test_cache_reuse_across_verified_cycles(self):
         model = FakeModel()
