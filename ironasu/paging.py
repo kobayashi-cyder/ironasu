@@ -171,7 +171,8 @@ class LayerPager:
 
     def __init__(self, model: Any, index: SafetensorsIndex, *, device: str = "cpu",
                  sync_timing: bool = False, prefetch: bool = False,
-                 cpu_cache_mb: int = 0, pin_stages: list[str] | None = None):
+                 cpu_cache_mb: int = 0, pin_stages: list[str] | None = None,
+                 expert_paging: bool = False, expert_cache_mb: int = 0):
         torch, _ = _deps()
         self.model = model
         self.index = index
@@ -182,6 +183,22 @@ class LayerPager:
             raise PagingError("CUDA device requested but CUDA is not available")
         self.sync_timing = sync_timing
         self.prefetch = prefetch
+        if type(expert_paging) is not bool:
+            raise PagingError("expert_paging must be a boolean")
+        if type(expert_cache_mb) is not int or expert_cache_mb < 0:
+            raise PagingError("expert_cache_mb must be a nonnegative integer")
+        if expert_cache_mb and not expert_paging:
+            raise PagingError("expert_cache_mb requires expert_paging=True")
+        self.expert_paging = expert_paging
+        from .moe import ExpertLRU, discover_experts
+        self._expert_cache = ExpertLRU(expert_cache_mb * 1024**2)
+        self._expert_stages: list[_Stage] = []
+        self._expert_resident: set[str] = set()
+        self._expert_trace: dict[str, dict[str, float | int]] = defaultdict(lambda: {
+            "loads": 0, "disk_seconds": 0.0, "transfer_seconds": 0.0,
+            "compute_seconds": 0.0, "disk_read_bytes": 0,
+        })
+        self._expert_started: dict[str, float] = {}
         if isinstance(cpu_cache_mb, bool) or not isinstance(cpu_cache_mb, int) or cpu_cache_mb < 0:
             raise PagingError("cpu_cache_mb must be a nonnegative integer")
         if pin_stages is not None and cpu_cache_mb == 0:
@@ -219,6 +236,13 @@ class LayerPager:
         self._resident: set[str] = set()
         self._stages: list[_Stage] = []
         stage_names = decoder_stage_names(model)
+        try:
+            expert_modules = discover_experts(model, stage_names) if expert_paging else {}
+        except ValueError as exc:
+            raise PagingError(str(exc)) from exc
+        if expert_paging and not expert_modules:
+            raise PagingError("No ModuleList experts found; packed/vectorized MoE unsupported")
+        expert_prefixes = tuple(name + "." for name in expert_modules)
         # Detect parameter aliases (notably tied embedding and lm_head weights).
         aliases: dict[int, list[str]] = defaultdict(list)
         all_parameters: dict[str, Any] = {}
@@ -234,6 +258,8 @@ class LayerPager:
             slots: list[_Slot] = []
             for local, parameter in module.named_parameters(remove_duplicate=False):
                 qualified = f"{path}.{local}"
+                if expert_prefixes and qualified.startswith(expert_prefixes):
+                    continue
                 source_key = qualified if qualified in names else next(
                     (candidate for candidate in aliases[id(parameter)] if candidate in names), None
                 )
@@ -255,6 +281,8 @@ class LayerPager:
                 seen.add(qualified)
             for local, tensor in module.named_buffers(recurse=True):
                 qualified = f"{path}.{local}"
+                if expert_prefixes and qualified.startswith(expert_prefixes):
+                    continue
                 if qualified not in names:
                     # Nonpersistent attention/rotary buffers are not part of weight streaming.
                     continue
@@ -262,6 +290,26 @@ class LayerPager:
                 owner = module.get_submodule(parent) if parent else module
                 slots.append(_Slot(owner, attr, qualified, qualified, tuple(tensor.shape), tensor.dtype, True))
             self._stages.append(_Stage(path, module, slots))
+        # Expert parameters must be accounted for, but are *not* loaded with
+        # their parent decoder block. Hooks load only the experts routed to.
+        for path, module in expert_modules.items():
+            slots: list[_Slot] = []
+            for local, parameter in module.named_parameters(remove_duplicate=False):
+                qualified = f"{path}.{local}"
+                if qualified not in names:
+                    raise PagingError(f"Missing expert tensor: {qualified}")
+                parent, _, attr = local.rpartition(".")
+                owner = module.get_submodule(parent) if parent else module
+                slots.append(_Slot(owner, attr, qualified, qualified, tuple(parameter.shape), parameter.dtype, False))
+                seen.add(qualified)
+            for local, tensor in module.named_buffers(recurse=True):
+                qualified = f"{path}.{local}"
+                if qualified not in names:
+                    continue
+                parent, _, attr = local.rpartition(".")
+                owner = module.get_submodule(parent) if parent else module
+                slots.append(_Slot(owner, attr, qualified, qualified, tuple(tensor.shape), tensor.dtype, True))
+            self._expert_stages.append(_Stage(path, module, slots))
         unexpected = sorted(set(all_parameters) - seen)
         if unexpected:
             raise PagingError(f"Unsupported non-streamed parameters: {unexpected[:5]}")
@@ -332,6 +380,9 @@ class LayerPager:
         for stage in self._stages:
             self._hooks.append(stage.module.register_forward_pre_hook(self._make_pre(stage)))
             self._hooks.append(stage.module.register_forward_hook(self._make_post(stage), always_call=True))
+        for expert in self._expert_stages:
+            self._hooks.append(expert.module.register_forward_pre_hook(self._make_expert_pre(expert)))
+            self._hooks.append(expert.module.register_forward_hook(self._make_expert_post(expert), always_call=True))
 
     def _sync(self) -> None:
         torch, _ = _deps()
@@ -455,6 +506,61 @@ class LayerPager:
                 self._evict(stage)
         return hook
 
+    def _make_expert_pre(self, expert: _Stage):
+        def hook(module: Any, arguments: Any) -> None:
+            if self._closed or not self._busy:
+                raise PagingError("Use pager.session() for expert inference")
+            if expert.name in self._expert_resident:
+                raise PagingError(f"Expert already materialized: {expert.name}")
+            self._sync()
+            keys = list(dict.fromkeys(slot.checkpoint_name for slot in expert.slots))
+            tensors = self._expert_cache.get(expert.name)
+            if tensors is None:
+                start = perf_counter()
+                tensors = self.index.read(keys)
+                elapsed = perf_counter() - start
+                from .q4 import _bytes
+                self._expert_trace[expert.name]["disk_read_bytes"] += sum(_bytes(v) for v in tensors.values())
+                self._expert_trace[expert.name]["disk_seconds"] += elapsed
+                if any(tuple(tensors[slot.checkpoint_name].shape) != slot.shape for slot in expert.slots):
+                    raise PagingError(f"Expert tensor shape mismatch: {expert.name}")
+                self._expert_cache.put(expert.name, tensors)
+            start = perf_counter()
+            try:
+                torch, _ = _deps()
+                for slot in expert.slots:
+                    tensor = tensors[slot.checkpoint_name]
+                    if tuple(tensor.shape) != slot.shape:
+                        raise PagingError(f"Expert tensor shape mismatch: {slot.tensor_name}")
+                    loaded = tensor.to(device=self.device)
+                    if slot.buffer:
+                        slot.owner._buffers[slot.local] = loaded
+                    else:
+                        slot.owner._parameters[slot.local] = torch.nn.Parameter(loaded, requires_grad=False)
+                self._sync()
+                self._expert_resident.add(expert.name)
+                self._expert_trace[expert.name]["loads"] += 1
+                self._expert_trace[expert.name]["transfer_seconds"] += perf_counter() - start
+                self._expert_started[expert.name] = perf_counter()
+            except BaseException:
+                self._evict(expert)
+                self._expert_resident.discard(expert.name)
+                raise
+        return hook
+
+    def _make_expert_post(self, expert: _Stage):
+        def hook(module: Any, arguments: Any, output: Any) -> None:
+            try:
+                if expert.name in self._expert_resident:
+                    self._sync()
+                    self._expert_trace[expert.name]["compute_seconds"] += (
+                        perf_counter() - self._expert_started.pop(expert.name, perf_counter())
+                    )
+            finally:
+                self._evict(expert)
+                self._expert_resident.discard(expert.name)
+        return hook
+
     @contextmanager
     def session(self) -> Iterator[Any]:
         with self._lock:
@@ -468,6 +574,10 @@ class LayerPager:
             finally:
                 for stage in self._stages:
                     self._evict(stage)
+                for expert in self._expert_stages:
+                    self._evict(expert)
+                self._expert_resident.clear()
+                self._expert_started.clear()
                 self._run_started.clear()
                 if self._ahead is not None:
                     _, future = self._ahead
@@ -482,6 +592,13 @@ class LayerPager:
         return {
             "device": str(self.device),
             "stage_count": len(self._stages),
+            "expert_paging": {
+                "enabled": self.expert_paging,
+                "indexed_experts": len(self._expert_stages),
+                "resident_experts": len(self._expert_resident),
+                "cache": self._expert_cache.snapshot(),
+                "per_expert": {name: dict(data) for name, data in self._expert_trace.items()},
+            },
             "prefetch": self.prefetch,
             "resident_stage_count": len(self._resident),
             "cpu_cache": {
@@ -517,6 +634,10 @@ class LayerPager:
             self._hooks.clear()
             for stage in self._stages:
                 self._evict(stage)
+            for expert in self._expert_stages:
+                self._evict(expert)
+            self._expert_resident.clear()
+            self._expert_cache.clear()
             self._cpu_cache.clear()
             self._cpu_cache_bytes = 0
             self._closed = True

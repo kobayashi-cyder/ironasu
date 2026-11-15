@@ -32,7 +32,7 @@ def _dtype_name(tensor: Any) -> str:
 
 def _bytes(tensor: Any) -> int:
     """Resident payload size, excluding object and allocator overhead."""
-    if isinstance(tensor, Q4Tensor):
+    if isinstance(tensor, Q4Tensor) or hasattr(tensor, "storage_bytes"):
         return tensor.storage_bytes
     return tensor.numel() * tensor.element_size()
 

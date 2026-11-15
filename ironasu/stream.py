@@ -21,19 +21,26 @@ class PagedCausalLM:
     def from_local_dir(cls, directory: str | Path, *, device: str = "cpu",
                        sync_timing: bool = False, prefetch: bool = False,
                        cpu_cache_mb: int = 0, pin_stages: list[str] | None = None,
-                       q4_dir: str | Path | None = None) -> "PagedCausalLM":
+                       q4_dir: str | Path | None = None,
+                       expert_paging: bool = False, expert_cache_mb: int = 0,
+                       use_mxfp4: bool = False) -> "PagedCausalLM":
         try:
             import torch
             from accelerate import init_empty_weights
             from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
         except ImportError as exc:
             raise PagingError("Install ironasu[stream] (requires transformers and accelerate)") from exc
+        if q4_dir is not None and use_mxfp4:
+            raise PagingError("--q4-dir and --native-mxfp4 are mutually exclusive")
         path = Path(directory).expanduser().resolve(strict=True)
         if q4_dir is None:
             index = SafetensorsIndex(path)
         else:
             from .q4 import Q4Index
             index = Q4Index(q4_dir)
+        if use_mxfp4:
+            from .mxfp4 import MXFP4Index
+            index = MXFP4Index(index)
         # Local-only: prohibit downloading weights, tokenizers and remote Python code.
         config = AutoConfig.from_pretrained(path, local_files_only=True, trust_remote_code=False)
         with init_empty_weights(include_buffers=False):
@@ -42,7 +49,8 @@ class PagedCausalLM:
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
         pager = LayerPager(model, index, device=device, sync_timing=sync_timing,
                            prefetch=prefetch, cpu_cache_mb=cpu_cache_mb,
-                           pin_stages=pin_stages)
+                           pin_stages=pin_stages, expert_paging=expert_paging,
+                           expert_cache_mb=expert_cache_mb)
         return cls(model, tokenizer, pager)
 
     def generate(self, prompt: str, *, max_new_tokens: int = 16) -> str:
@@ -81,6 +89,12 @@ def main() -> None:
                         help="pin up to this many MiB of selected checkpoint tensors in CPU RAM; 0 disables")
     parser.add_argument("--pin-stage", action="append", default=None,
                         help="cache only this stage (repeatable); e.g. lm_head, model.embed_tokens")
+    parser.add_argument("--native-mxfp4", action="store_true",
+                        help="unpack native MXFP4 weight_packed/weight_scale pairs (reference CPU/CUDA decoder)")
+    parser.add_argument("--expert-paging", action="store_true",
+                        help="sparse ModuleList expert hooks; only selected experts loaded")
+    parser.add_argument("--expert-cache-mb", type=int, default=0,
+                        help="bounded CPU LRU of routed experts in MiB; requires --expert-paging")
     parser.add_argument("--auto-tune", action="store_true",
                         help="opt-in: compare paging strategies on a short same-prompt trial before generating")
     parser.add_argument("--tune-tokens", type=int, default=2,
@@ -90,6 +104,12 @@ def main() -> None:
     args = parser.parse_args()
     selected = {"prefetch": args.prefetch, "cpu_cache_mb": args.cpu_cache_mb,
                 "pin_stages": args.pin_stage}
+    if args.native_mxfp4 and args.q4_dir is not None:
+        parser.error("--native-mxfp4 and --q4-dir cannot be combined")
+    if args.auto_tune and args.native_mxfp4:
+        parser.error("--auto-tune with --native-mxfp4 is not yet supported")
+    if args.auto_tune and args.expert_paging:
+        parser.error("--auto-tune with --expert-paging is not yet supported")
     if args.auto_tune and args.q4_dir is not None:
         parser.error("--auto-tune with --q4-dir is not supported yet; use ironasu-benchmark-q4")
     if args.auto_tune:
@@ -103,7 +123,8 @@ def main() -> None:
         print(json.dumps({"ironasu_compass": report}, indent=2, ensure_ascii=False))
     engine = PagedCausalLM.from_local_dir(
         args.model_dir, device=args.device, sync_timing=args.profile,
-        q4_dir=args.q4_dir, **selected,
+        q4_dir=args.q4_dir, expert_paging=args.expert_paging,
+        expert_cache_mb=args.expert_cache_mb, use_mxfp4=args.native_mxfp4, **selected,
     )
     try:
         print(engine.generate(args.prompt, max_new_tokens=args.tokens))

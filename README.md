@@ -393,3 +393,87 @@ Limitations and resource cautions:
   autotuner requires bit-identical output, which is inappropriate for lossy Q4.
 - The checkpoint manifest uses local path validation and `safetensors` rather
   than pickle. Keep the original checkpoint secure; do not run untrusted code.
+
+## v0.8: demand-paged MoE experts and native MXFP4 reference decoder (experimental)
+
+**Purpose:** the full expert bank of a large MoE layer cannot be loaded in 16GB
+RAM. If a router selects a small number of expert modules for a token, ironasu
+can page **only those executed modules** out of local safetensors, evict their
+live parameters immediately after forward, and optionally cache hot expert
+weights in a bounded CPU LRU table. The enclosing decoder layer retains its
+router and attention weights only for its own forward. No source tensor names
+or checkpoint bytes need to be hashed.
+
+**Safety and support boundary:** this mode only works for a recognized decoder
+architecture with individually-called `nn.ModuleList` containers named
+`experts`, under `model.layers.N...experts`. Models with vectorized packed
+experts, fused operators that access expert parameters directly, or unsupported
+architectures **are not runnable** through this adapter. It does not implement
+Kimi K3's KDA/Gated-MLA/Attention Residuals, SiTU-GLU routing, multimodal stack,
+or model-specific custom execution. Kimi K3's weights cannot currently be fed
+to `ironasu-stream` to obtain an answer. Full Kimi inference is **unfinished**.
+
+Try a compatible small, local ModuleList-MoE checkpoint (no downloads or remote
+code) with:
+
+```bash
+pip install -e '.[stream]'
+python -m unittest discover -s tests -p test_moe.py -v
+python -m unittest discover -s tests -p test_mxfp4.py -v
+
+ironasu-stream ./models/supported-moe --device cpu \
+  --expert-paging --expert-cache-mb 256 \
+  --prompt 'Explain this Python function' --tokens 4
+```
+
+`--expert-cache-mb` bounds **stored CPU expert tensor payloads**, not temporary
+expert materialization, CUDA allocations, shard OS page cache or the base
+model layers. A too-large single expert is streamed without caching.
+`--expert-paging` is explicitly opt-in and rejects models without recognized
+`ModuleList` experts; `--expert-cache-mb` is invalid unless paging is enabled.
+For larger prefill batches many experts may be selected: sparse loading does
+**not** promise only 16 experts total per forward, or any speedup.
+
+### Metadata-only Kimi checkpoint planner
+
+```bash
+# Needs only model.safetensors.index.json. No tensor shards, GPU or PyTorch.
+ironasu-moe-plan ./models/Kimi-K3 \
+  --layer language_model.model.layers.1.block_sparse_moe.experts \
+  --expert 0 --expert 5 --expert 17
+```
+
+The planner reports the selected tensor key count and indexed shard count for
+known expert IDs. This does **not** identify the router's actual decisions or
+estimate physical SSD bytes. It refuses missing IDs; it never downloads weights
+or executes untrusted model code. It recognizes `.weight_packed` and
+`.weight_scale` index names.
+
+### Native MXFP4 (reference implementation, not optimized kernels)
+
+`ironasu.mxfp4.MXFP4Index` wraps `SafetensorsIndex` and presents an original
+MXFP4 pair `<name>.weight_packed` (U8 low nibble first) + `<name>.weight_scale`
+(U8 E8M0 exponent per 32 elements) as a *logical* `<name>.weight`. The
+`MXFP4Tensor` decoder uses OCP E2M1 FP4 values, no re-quantization or original
+FP16 checkpoint. It produces BF16 tensors by default (change dtype through
+Python API), with FP32 intermediate dequantization. It does **not** perform
+low-bit matrix multiplies: it fully expands one active matrix to the target
+CPU/GPU for computation. This is distinct from ironasu's own symmetric Q4
+format, which is not native Kimi MXFP4.
+
+For a compatible local ModuleList MoE model whose keys use the native pairing:
+
+```bash
+ironasu-stream ./models/compatible-native-mxfp4-moe \
+  --expert-paging --native-mxfp4 --expert-cache-mb 512 \
+  --device cpu --prompt 'hello' --tokens 4
+```
+
+The implementation is validated using synthetic native-format expert weights,
+exact OCP FP4 values, and a small real Torch MoE forward with output parity;
+**no 2.8T-model runtime or accuracy/speed benchmark has been performed**.
+MXFP4 conversion expands intermediate tensors, so peak memory and wall time may
+still be substantial. For Kimi, the remaining engineering task is an executable
+Kimi architecture adapter that can dispatch the top-k routed experts while
+handling its special attention/residuals and multimodal components, plus an
+optimized MXFP4 GEMM implementation and full end-to-end testing.
