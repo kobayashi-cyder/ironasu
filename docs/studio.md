@@ -12,8 +12,20 @@ llama.cpp server、LM StudioのOpenAI互換ローカルサーバーなどが必�
 
 ## 起動
 
+**もっとも簡単な完全オフライン起動**（Python 3.10以上のみ。事前のpip install不要）:
+
+```sh
+cd ironasu
+# 必要なら別のターミナルでローカルモデルサーバーを起動
+IRONASU_BACKEND_URL=http://127.0.0.1:8080/v1 python -m ironasu
+```
+
+Windows PowerShellでは環境変数を先にセットして `python -m ironasu` を実行します。
+この直接起動はリポジトリのルートから実行する場合に限ります。
+Python標準ライブラリだけでUIとプロキシが起動できます。
+
 ソースチェックアウトに、Python 3.10以上とビルド要件（setuptools>=68）
-がインストール済みの場合:
+がインストール済みでパッケージとして導入する場合:
 
 ```sh
 python -m pip install --no-index --no-build-isolation -e .
