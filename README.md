@@ -1,5 +1,16 @@
 # ironasu
 
+## v1.1 experimental runtime connection
+
+- **Verified greedy N-gram decoding** now has an opt-in `ironasu-stream --speculative-ngram` path. Candidate tokens are verified in a real paged target-model forward pass; rejected KV prefixes are cropped or invalidated and replayed. This is greedy-only, tested on a local tiny Qwen2, and **not** validated for Kimi K3.
+- **16-session DAG team scheduler** via `ironasu-team --tasks tasks.json --workers 16 --model-slots 2` supports shared briefs, dependency summaries, bounded model calls and independent persistent read-only sessions. This does not share attention/KV state between agents.
+- **A/B benchmark** via `ironasu-benchmark-ab` reports exact response parity, p50/p95, and tokens/s where available for two servers with the same target model. No 3T/70B hardware result is asserted.
+
+See [implementation and validation](docs/runtime-validation.md). The
+production out-of-core performance, optimized CUDA weight prefetch, and
+architecture-specific Kimi KV handling still require real-device integration.
+
+
 ## Unified ironasu v1.0 (integrated package)
 
 The project now ships several independently tested capabilities in **one Python
