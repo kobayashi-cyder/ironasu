@@ -31,6 +31,8 @@ def _cases(prompts: Iterable[str], *, repeats: int, warmup: int,
     if (not concurrencies or any(type(c) is not int or not 1 <= c <= 128 for c in concurrencies)
             or len(set(concurrencies)) != len(concurrencies)):
         raise ValueError("concurrencies must contain distinct integers in 1..128")
+    if max(concurrencies) > len(cases):
+        raise ValueError("each batch needs at least as many prompts as the highest concurrency")
     return cases
 
 
