@@ -101,6 +101,36 @@ path against standard `ironasu-stream` using repeated fixed prompts on the
 same hardware if available, but the A/B HTTP benchmark measures two upstream
 servers, not this local CLI directly.
 
+### When one machine cannot host two huge models at once
+
+Use **sequential redacted captures**. First start the baseline server and run:
+
+```sh
+ironasu-benchmark-capture capture --prompts prompts.json \
+  --endpoint http://127.0.0.1:8080/v1 --model SAME_ID \
+  --output baseline-capture.json --repeat 3
+```
+
+Shut down the baseline server, reconfigure the **same target model** with
+verified speculative decoding, and run:
+
+```sh
+ironasu-benchmark-capture capture --prompts prompts.json \
+  --endpoint http://127.0.0.1:8080/v1 --model SAME_ID \
+  --output speculative-capture.json --repeat 3
+ironasu-benchmark-capture compare \
+  --baseline baseline-capture.json \
+  --candidate speculative-capture.json \
+  --output comparison.json
+```
+
+The capture files contain SHA-256 hashes of prompts and outputs, never raw
+text. Each capture validates model ID, token budget, input hashes, sample order
+and repeats. Note that a digest is not encryption: low-entropy prompts may
+still be guessable. Performance may vary between sequential runs due to
+thermal state, disk cache and operating-system load, so repeat across orders
+and record hardware conditions.
+
 ## Acceptance gates for a 3T-class claim
 
 1. Actual checkpoint with correct custom architecture and tokenizer (not only
