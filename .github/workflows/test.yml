@@ -17,6 +17,7 @@ jobs:
         run: |
           python -m pip install -e .
           ironasu-harness --help
+          ironasu-studio --help
           ironasu-team --help
           ironasu-benchmark-ab --help
           ironasu-regression-gate --help

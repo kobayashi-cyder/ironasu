@@ -1,5 +1,7 @@
 # ironasu Studio — オフラインで動くWeb UI
 
+Windows用のインストーラー（Python不要）と各LLMサーバーの接続方法は [インストールと互換性](install.md) を参照してください。`ironasu-studio` コマンドはローカルサーバーの自動検出、モデルID自動選択、ブラウザ起動に対応します。元の `python -m ironasu` も引き続き利用できます。
+
 **ironasu Studio** は LM Studio風の操作感を持つ、追加ランタイム依存のないWeb UIです。
 HTML / CSS / JavaScript はPythonパッケージに含まれています。CDN、Google Fonts、
 クラウドAPI、インターネットアクセスは不要です。表示と既存のironasuゲートウェイは

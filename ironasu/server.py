@@ -6,6 +6,8 @@ from importlib import resources
 from urllib.parse import urlsplit
 import hmac
 import json
+import threading
+import webbrowser
 
 from .core import AdaptiveEngine, Config, InferenceError
 
@@ -74,11 +76,18 @@ def make_handler(engine: AdaptiveEngine):
                 })
             elif path == "/ui/status":
                 discovered = engine.upstream_models()
+                fast, quality = engine.effective_models(discovered)
+                endpoint = getattr(engine.backend, "endpoint", None)
+                origin = endpoint() if callable(endpoint) else {
+                    "provider": "custom", "url": settings.backend_url,
+                }
                 self._send(200, {
                     "upstream_available": discovered is not None,
                     "upstream_models": discovered or [],
-                    "fast_model": settings.fast_model,
-                    "quality_model": settings.quality_model,
+                    "fast_model": fast,
+                    "quality_model": quality,
+                    "provider": origin["provider"],
+                    "backend_url": origin["url"],
                     "metrics": engine.diagnostic_snapshot(),
                 })
             else:
@@ -126,11 +135,17 @@ def make_handler(engine: AdaptiveEngine):
     return Handler
 
 
-def serve(config: Config | None = None) -> None:
+def serve(config: Config | None = None, *, backend=None, open_browser: bool = False) -> None:
     settings = config or Config.from_env()
-    engine = AdaptiveEngine(settings)
+    engine = AdaptiveEngine(settings, backend)
     server = ThreadingHTTPServer((settings.listen_host, settings.listen_port), make_handler(engine))
-    print(f"ironasu ready at http://{settings.listen_host}:{settings.listen_port}/ui", flush=True)
+    url = f"http://{settings.listen_host}:{server.server_port}/ui"
+    print(f"ironasu ready at {url}", flush=True)
+    if open_browser:
+        # Schedule only after the listening socket exists; no extra dependencies.
+        timer = threading.Timer(0.4, webbrowser.open, args=(url,))
+        timer.daemon = True
+        timer.start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

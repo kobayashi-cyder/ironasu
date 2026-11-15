@@ -27,6 +27,7 @@ class Config:
     backend_key: str = ""
     fast_model: str = "qwen2.5-coder-1.5b"
     quality_model: str = "qwen2.5-coder-7b"
+    auto_models: bool = False
     max_concurrency: int = 2
     max_waiting_requests: int = 32
     queue_timeout_s: float = 10.0
@@ -46,6 +47,7 @@ class Config:
             backend_key=e.get("IRONASU_BACKEND_KEY", ""),
             fast_model=e.get("IRONASU_FAST_MODEL", cls.fast_model),
             quality_model=e.get("IRONASU_QUALITY_MODEL", cls.quality_model),
+            auto_models=e.get("IRONASU_AUTO_MODELS", "").lower() in ("1", "true", "yes"),
             max_concurrency=int(e.get("IRONASU_MAX_CONCURRENCY", 2)),
             max_waiting_requests=int(e.get("IRONASU_MAX_WAITING_REQUESTS", 32)),
             queue_timeout_s=float(e.get("IRONASU_QUEUE_TIMEOUT_S", 10)),
@@ -106,12 +108,12 @@ class HTTPBackend:
         except (URLError, TimeoutError, OSError, ValueError) as exc:
             raise InferenceError("upstream streaming unavailable", 502) from exc
 
-    def list_models(self) -> list[str] | None:
+    def list_models(self, *, timeout_s: float = 3.0) -> list[str] | None:
         """Best-effort discovery; never send upstream credentials to the browser."""
         req = Request(self.config.backend_url.rstrip("/") + "/models",
                       headers=self._headers(), method="GET")
         try:
-            with urlopen(req, timeout=min(3.0, self.config.request_timeout_s)) as response:
+            with urlopen(req, timeout=min(timeout_s, self.config.request_timeout_s)) as response:
                 raw = response.read(262145)
             if len(raw) > 262144:
                 return None
@@ -380,7 +382,16 @@ class AdaptiveEngine:
             elif payload.get("model") == "ironasu-quality":
                 mode = "quality"
         route = _route(messages, mode, self.metrics.is_pressured())
-        return route, (self.config.fast_model if route == "fast" else self.config.quality_model)
+        chosen = self.config.fast_model if route == "fast" else self.config.quality_model
+        if self.config.auto_models and not chosen:
+            catalog = self.upstream_models()
+            if not catalog:
+                raise InferenceError(
+                    "No model available. Start a local model server and load a model, then retry.",
+                    503,
+                )
+            chosen = catalog[0]
+        return route, chosen
 
     @contextmanager
     def stream(self, payload: dict[str, Any]):
@@ -427,6 +438,15 @@ class AdaptiveEngine:
             self.metrics.record(route, time.perf_counter() - started, wait_s, failed)
             self.metrics.adjust_admission(active_delta=-1)
             self._slots.release()
+
+    def effective_models(self, discovered: list[str] | None = None) -> tuple[str | None, str | None]:
+        if discovered is None:
+            discovered = self.upstream_models()
+        first = discovered[0] if discovered else None
+        return (
+            self.config.fast_model or (first if self.config.auto_models else None),
+            self.config.quality_model or (first if self.config.auto_models else None),
+        )
 
     def upstream_models(self) -> list[str] | None:
         discover = getattr(self.backend, "list_models", None)
