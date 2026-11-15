@@ -83,8 +83,12 @@ class Orchestrator:
             raise ValueError("Settings workspace mismatch")
         self.inference_gate = threading.BoundedSemaphore(max_active_inference)
         self.tool_gate = threading.BoundedSemaphore(max_parallel_tools)
+        # Avoid lost writes / running checks during a concurrent source mutation.
+        self.workspace_gate = threading.BoundedSemaphore(1)
         self.runner = runner
         root = self.workspace / ".ironasu"
+        if root.is_symlink():
+            raise ValueError("Refusing a symlinked .ironasu state directory")
         root.mkdir(mode=0o700, exist_ok=True)
         self.db_path = root / "orchestrator.sqlite"
         self._initialize()
@@ -448,7 +452,8 @@ class Orchestrator:
 
     def _default_runner(self, agent_id: str, task_id: str, prompt: str) -> WorkerResult:
         backend = LimitedBackend(OpenAIBackend(self.settings), self.inference_gate)
-        harness = Harness(self.settings, backend=backend, tool_gate=self.tool_gate)
+        harness = Harness(self.settings, backend=backend, tool_gate=self.tool_gate,
+                          workspace_gate=self.workspace_gate)
         try:
             session_id = "orch-" + task_id
             old = harness.store.load(session_id)
