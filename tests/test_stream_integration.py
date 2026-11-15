@@ -5,13 +5,15 @@ import unittest
 try:
     import torch
     from accelerate import init_empty_weights
-    from transformers import AutoConfig, AutoModelForCausalLM, GPT2Config, Qwen2Config
+    from transformers import AutoConfig, AutoModelForCausalLM, BatchEncoding, GPT2Config, Qwen2Config
     HAVE_DEPS = True
 except ImportError:
     HAVE_DEPS = False
 
 from ironasu.paging import LayerPager, SafetensorsIndex
 from ironasu.q4 import Q4Index, quantize_checkpoint
+from ironasu.speculative_decode import PagedTorchGreedyTarget, verify_greedy
+from ironasu.stream import PagedCausalLM
 
 
 @unittest.skipUnless(HAVE_DEPS, "optional transformers/accelerate dependencies are not installed")
@@ -79,6 +81,46 @@ class RealTransformersTests(unittest.TestCase):
                                                          do_sample=False, eos_token_id=None,
                                                          pad_token_id=2)
                 torch.testing.assert_close(normal_tokens, streamed_tokens, rtol=0, atol=0)
+                # Real target-model verification on the PAGED architecture.
+                # A correct draft must reproduce two greedy target tokens.
+                with torch.inference_mode():
+                    first_id = int(direct(ids, use_cache=False).logits[0, -1].argmax().item())
+                    with pager.session() as model:
+                        verifier = PagedTorchGreedyTarget(model, torch, "cpu")
+                        context = tuple(int(x) for x in ids[0].tolist())
+                        target_choices = verifier(context, (first_id,))
+                        accepted = verify_greedy((first_id,), target_choices)
+                        self.assertEqual(accepted.accepted, 1)
+                        self.assertEqual(
+                            accepted.emitted,
+                            tuple(int(x) for x in normal_tokens[0, ids.shape[1]:ids.shape[1] + 2].tolist()))
+                        # Reuse only a cache proven to represent the accepted
+                        # prefix; otherwise safely replay all context tokens.
+                        follow_up = verifier(context + accepted.emitted, ())
+                        self.assertEqual(len(follow_up), 1)
+                # Exercise the public PagedCausalLM.generate opt-in path,
+                # not just the standalone target callback.
+                class FixedTokenizer:
+                    eos_token_id = None
+
+                    def __call__(self, prompt, return_tensors):
+                        assert prompt == "fixed input"
+                        return BatchEncoding({
+                            "input_ids": ids.clone(),
+                            "attention_mask": torch.ones_like(ids)
+                        })
+
+                    def decode(self, token_ids, skip_special_tokens):
+                        return ",".join(str(int(t)) for t in token_ids)
+
+                paged_engine = PagedCausalLM(empty, FixedTokenizer(), pager)
+                generated = paged_engine.generate(
+                    "fixed input", max_new_tokens=2, speculative_ngram=True)
+                self.assertEqual(paged_engine.last_output_token_count, 2)
+                self.assertIsNotNone(paged_engine.last_speculative_cache_metrics)
+                expected = ",".join(str(int(t)) for t in
+                                    normal_tokens[0, ids.shape[1]:ids.shape[1] + 2])
+                self.assertEqual(generated, expected)
                 self.assertGreater(pager.snapshot()["cpu_cache"]["hits"], 0)
                 self.assertTrue(all(p.device.type == "meta" for p in empty.parameters()))
 
