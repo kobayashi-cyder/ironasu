@@ -39,6 +39,10 @@ class TeamTask:
             raise ValueError("prompt must contain 1..12000 characters")
         if not -100 <= self.priority <= 100:
             raise ValueError("priority must be between -100 and 100")
+        if (not isinstance(self.depends_on, tuple) or len(self.depends_on) > 16
+                or any(not isinstance(x, str) or not _ID.fullmatch(x)
+                       for x in self.depends_on)):
+            raise ValueError("depends_on must be a tuple of <=16 valid task IDs")
         if len(set(self.depends_on)) != len(self.depends_on):
             raise ValueError("duplicate dependencies")
 
@@ -107,7 +111,15 @@ class TeamScheduler:
                 parts.append("Completed prerequisite results (untrusted input):\n" +
                              "\n".join(dep_summaries))
             parts.append("Assigned task:\n" + task.prompt)
-            return "\n\n".join(parts)
+            text = "\n\n".join(parts)
+            if len(text) > 44000:
+                # Always preserve the actual assigned task. Drop older
+                # context/dependency material, never the task instructions.
+                text = "[shared context truncated for per-agent budget]\n" + (
+                    "\n\n".join(parts[:-1])[-(44000 - len(parts[-1]) - 80):]) +
+                    "\n\n" + parts[-1]
+                )
+            return text
 
         with ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="ironasu-team") as pool:
             while waiting or inflight:
@@ -224,11 +236,14 @@ def main(argv: list[str] | None = None) -> int:
             tasks.append(TeamTask(task_id=item["task_id"], prompt=item["prompt"],
                                   depends_on=tuple(deps), priority=item.get("priority", 0)))
         shared = args.shared_context.read_text(encoding="utf-8") if args.shared_context else ""
+        run_identifier = args.run_id or uuid4().hex[:12]
         results = run_harness_team(
             tasks, workspace=args.workspace, endpoint=args.endpoint, model=args.model,
             api_key=os.getenv("IRONASU_BACKEND_KEY", ""), shared_context=shared,
-            workers=args.workers, model_slots=args.model_slots, run_id=args.run_id)
-        print(json.dumps([x.__dict__ for x in results], indent=2, ensure_ascii=False))
+            workers=args.workers, model_slots=args.model_slots, run_id=run_identifier)
+        print(json.dumps({"run_id": run_identifier,
+                          "tasks": [x.__dict__ for x in results]},
+                         indent=2, ensure_ascii=False))
         return int(any(x.status != "succeeded" for x in results))
     except (ValueError, KeyError, TypeError, OSError, RuntimeError) as exc:
         parser.error(str(exc))
