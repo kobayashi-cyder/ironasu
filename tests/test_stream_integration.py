@@ -12,6 +12,7 @@ except ImportError:
 
 from ironasu.paging import LayerPager, SafetensorsIndex
 from ironasu.q4 import Q4Index, quantize_checkpoint
+from ironasu.speculative_decode import PagedTorchGreedyTarget, verify_greedy
 
 
 @unittest.skipUnless(HAVE_DEPS, "optional transformers/accelerate dependencies are not installed")
@@ -79,6 +80,23 @@ class RealTransformersTests(unittest.TestCase):
                                                          do_sample=False, eos_token_id=None,
                                                          pad_token_id=2)
                 torch.testing.assert_close(normal_tokens, streamed_tokens, rtol=0, atol=0)
+                # Real target-model verification on the PAGED architecture.
+                # A correct draft must reproduce two greedy target tokens.
+                with torch.inference_mode():
+                    first_id = int(direct(ids, use_cache=False).logits[0, -1].argmax().item())
+                    with pager.session() as model:
+                        verifier = PagedTorchGreedyTarget(model, torch, "cpu")
+                        context = tuple(int(x) for x in ids[0].tolist())
+                        target_choices = verifier(context, (first_id,))
+                        accepted = verify_greedy((first_id,), target_choices)
+                        self.assertEqual(accepted.accepted, 1)
+                        self.assertEqual(
+                            accepted.emitted,
+                            tuple(int(x) for x in normal_tokens[0, ids.shape[1]:].tolist()))
+                        # Reuse only a cache proven to represent the accepted
+                        # prefix; otherwise safely replay all context tokens.
+                        follow_up = verifier(context + accepted.emitted, ())
+                        self.assertEqual(len(follow_up), 1)
                 self.assertGreater(pager.snapshot()["cpu_cache"]["hits"], 0)
                 self.assertTrue(all(p.device.type == "meta" for p in empty.parameters()))
 
