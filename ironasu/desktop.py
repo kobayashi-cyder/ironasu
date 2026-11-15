@@ -145,7 +145,7 @@ class DesktopWindow:
                         foreground=MINT, font=("Segoe UI", 9, "bold"))
         style.map("Studio.Treeview", background=[("selected", "#2c5346")],
                   foreground=[("selected", FOREGROUND)])
-        style.configure("Studio.TProgressbar", background=MINT, troughcolor=SURFACE_ALT)
+        style.configure("Studio.Horizontal.TProgressbar", background=MINT, troughcolor=SURFACE_ALT)
         style.configure("Studio.TNotebook", background=BACKGROUND, borderwidth=0)
         style.configure("Studio.TNotebook.Tab", background=NAV,
                         foreground=MUTED, padding=(17, 11))
@@ -523,7 +523,7 @@ class DesktopWindow:
         self.agent_stop.config(state="disabled")
         self.agent_progress = ttk.Progressbar(action_row, orient="horizontal",
                                                length=180, maximum=100,
-                                               style="Studio.TProgressbar")
+                                               style="Studio.Horizontal.TProgressbar")
         self.agent_progress.pack(side="right", padx=8)
         self.agent_state = self._label(options, "未実行", bg=SURFACE, color=MUTED, size=9)
         self.agent_state.grid(row=8, column=0, columnspan=7, sticky="w", pady=(9, 0))
