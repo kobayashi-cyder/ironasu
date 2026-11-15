@@ -1,4 +1,10 @@
-# ironasu Studio installation and backend compatibility (v1.5)
+# ironasu Studio installation and backend compatibility (v1.6)
+
+**Desktop default:** Windows v1.6 installs ironasu-studio.exe as a native
+window, not a browser launcher. There is no localhost UI port to open.
+Use ironasu-studio-web for the legacy browser UI. See
+[native window + agent instructions](desktop.md).
+
 
 v1.5は外部モデル管理アプリなしでも、Hugging Faceから公開GGUFモデルを
 直接保存できます。ダウンロードにはインターネット接続が必要ですが、

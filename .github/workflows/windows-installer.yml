@@ -36,6 +36,7 @@ jobs:
           python -m venv /tmp/ironasu-clean
           /tmp/ironasu-clean/bin/python -m pip install --no-index --no-deps dist/wheels/*.whl
           /tmp/ironasu-clean/bin/ironasu-studio --help
+          /tmp/ironasu-clean/bin/ironasu-desktop --self-test /tmp/ironasu-native-wheel.json
           cd /tmp
           /tmp/ironasu-clean/bin/python -c "from importlib.resources import files; assert files('ironasu.web').joinpath('index.html').is_file()"
       - uses: actions/upload-artifact@v4
@@ -52,38 +53,30 @@ jobs:
           architecture: x64
       - name: Install build tools
         run: python -m pip install -e . pyinstaller
-      - name: Build portable standalone app (bundled Python + offline UI)
+      - name: Build standalone native desktop window (bundled Python and Tk)
         run: >-
-          python -m PyInstaller --noconfirm --clean --onedir
+          python -m PyInstaller --noconfirm --clean --windowed --onedir
           --name ironasu-studio --collect-data ironasu.web
-          scripts/ironasu_studio_entry.py
-      - name: Smoke-test standalone app without a model server
+          scripts/ironasu_desktop_entry.py
+      - name: Smoke-test native window (no browser, no model server)
         shell: pwsh
         run: |
-          & ".\dist\ironasu-studio\ironasu-studio.exe" --help
-          if ($LASTEXITCODE -ne 0) { throw "CLI launch failed" }
-          $proc = Start-Process -FilePath ".\dist\ironasu-studio\ironasu-studio.exe" -ArgumentList @("--no-browser", "--provider", "lmstudio", "--port", "19876") -PassThru
-          try {
-            $ready = $false
-            for ($i = 0; $i -lt 30; $i++) {
-              Start-Sleep -Seconds 1
-              try {
-                $response = Invoke-WebRequest -Uri "http://127.0.0.1:19876/ui" -TimeoutSec 2 -UseBasicParsing
-                if ($response.StatusCode -eq 200 -and $response.Content -match "ironasu") {
-                  $ready = $true
-                  break
-                }
-              } catch { }
-            }
-            if (-not $ready) { throw "Standalone offline UI did not start" }
-          } finally {
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-          }
+          $exe = ".\dist\ironasu-studio\ironasu-studio.exe"
+          $target = Join-Path $env:RUNNER_TEMP "desktop-selftest.json"
+          $smoke = Join-Path $env:RUNNER_TEMP "desktop-gui.json"
+          $process = Start-Process -FilePath $exe -ArgumentList @("--self-test", $target) -Wait -PassThru
+          if ($process.ExitCode -ne 0 -or -not (Test-Path $target)) { throw "Native desktop self-test failed" }
+          $report = Get-Content $target -Raw | ConvertFrom-Json
+          if ($report.mode -ne "native-tk-desktop" -or $report.browser_required) { throw "Unexpected browser dependency" }
+          $process = Start-Process -FilePath $exe -ArgumentList @("--smoke-gui", $smoke) -Wait -PassThru
+          if ($process.ExitCode -ne 0 -or -not (Test-Path $smoke)) { throw "Native window creation failed" }
+          $gui = Get-Content $smoke -Raw | ConvertFrom-Json
+          if (-not $gui.native_window_created -or $gui.agents_max -ne 16) { throw "Native agent GUI is missing" }
       - name: Package portable ZIP
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "dist\installers" | Out-Null
-          Compress-Archive -Path "dist\ironasu-studio\*" -DestinationPath "dist\installers\ironasu-studio-1.5.0-windows-x64-portable.zip" -Force
+          Compress-Archive -Path "dist\ironasu-studio\*" -DestinationPath "dist\installers\ironasu-studio-1.6.0-windows-x64-portable.zip" -Force
       - name: Build offline Windows setup
         shell: pwsh
         run: |
@@ -102,8 +95,9 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "Setup exit code $($p.ExitCode)" }
           $installed = Join-Path $env:LOCALAPPDATA "Programs\ironasu Studio\ironasu-studio.exe"
           if (-not (Test-Path $installed)) { throw "Installed executable not found" }
-          & $installed --help
-          if ($LASTEXITCODE -ne 0) { throw "Installed app failed to launch" }
+          $report = Join-Path $env:RUNNER_TEMP "installed-desktop.json"
+          $process = Start-Process -FilePath $installed -ArgumentList @("--self-test", $report) -Wait -PassThru
+          if ($process.ExitCode -ne 0 -or -not (Test-Path $report)) { throw "Installed desktop app failed" }
       - uses: actions/upload-artifact@v4
         with:
           name: ironasu-studio-windows-x64-offline-installers

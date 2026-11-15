@@ -18,6 +18,10 @@ jobs:
           python -m pip install -e .
           ironasu-harness --help
           ironasu-studio --help
+          ironasu-desktop --help
+          ironasu-studio-web --help
+          ironasu-studio --self-test /tmp/ironasu-desktop-check.json
+          python -c "import json; j=json.load(open('/tmp/ironasu-desktop-check.json')); assert j['browser_required'] is False"
           ironasu-team --help
           ironasu-benchmark-ab --help
           ironasu-regression-gate --help
