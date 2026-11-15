@@ -309,9 +309,9 @@ class LayerPager:
             }
             # How much RAM stage-keyed caching would have reserved for aliases.
             planned_bytes_without_dedup = sum(
-                checkpoint_sizes[slot.checkpoint_name]
+                checkpoint_sizes[key]
                 for stage in candidates if stage.name in self._pin_stage_names
-                for slot in stage.slots
+                for key in set(slot.checkpoint_name for slot in stage.slots)
             )
             self._deduplicated_planned_bytes = (
                 planned_bytes_without_dedup - sum(self._cache_tensor_bytes.values())
