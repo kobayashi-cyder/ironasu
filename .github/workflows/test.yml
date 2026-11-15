@@ -19,6 +19,7 @@ jobs:
           ironasu-harness --help
           ironasu-team --help
           ironasu-benchmark-ab --help
+          ironasu-benchmark-capture --help
       - name: Run standard-library unit tests
         run: |
           python -m unittest discover -s tests -v
