@@ -34,6 +34,15 @@ class RealTransformersTests(unittest.TestCase):
                     with pager.session() as model:
                         second = model(ids, use_cache=True)
                 torch.testing.assert_close(first.logits, second.logits, atol=1e-5, rtol=1e-5)
+                # Compare greedy generation including two KV-cache decoding steps.
+                with torch.inference_mode():
+                    normal_tokens = direct.generate(ids, max_new_tokens=2, do_sample=False,
+                                                    eos_token_id=None, pad_token_id=2)
+                    with pager.session() as model:
+                        streamed_tokens = model.generate(ids, max_new_tokens=2,
+                                                         do_sample=False, eos_token_id=None,
+                                                         pad_token_id=2)
+                torch.testing.assert_close(normal_tokens, streamed_tokens, rtol=0, atol=0)
                 self.assertTrue(all(p.device.type == "meta" for p in empty.parameters()))
 
 
