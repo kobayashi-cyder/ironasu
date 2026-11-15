@@ -29,7 +29,7 @@ ironasu-load-gate load.json \
   --output load-verdict.json
 ```
 
-The benchmark alternates which server runs first on each repetition. It
+Supply at least as many prompt entries as the largest requested concurrency\n(e.g. at least 32 prompts when using `--concurrency 1,8,32`). The client\nrefuses higher worker counts rather than silently reporting unachievable\nconcurrency.\n\nThe benchmark alternates which server runs first on each repetition. It
 never drives both servers simultaneously during the same trial: this limits
 competition for resources but does not eliminate order, temperature, cache,
 network or other environmental effects.
