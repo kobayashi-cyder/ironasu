@@ -115,10 +115,11 @@ class TeamScheduler:
             if len(text) > 44000:
                 # Always preserve the actual assigned task. Drop older
                 # context/dependency material, never the task instructions.
-                text = "[shared context truncated for per-agent budget]\n" + (
-                    "\n\n".join(parts[:-1])[-(44000 - len(parts[-1]) - 80):]) +
-                    "\n\n" + parts[-1]
-                )
+                extra = "\n\n".join(parts[:-1])
+                limit = max(0, 44000 - len(parts[-1]) - 80)
+                trimmed = extra[-limit:] if limit else ""
+                text = ("[shared context truncated for per-agent budget]\n" +
+                        trimmed + "\n\n" + parts[-1])
             return text
 
         with ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="ironasu-team") as pool:
