@@ -210,6 +210,20 @@ TOOLS = [{"type": "function", "function": {
                    "additionalProperties": False}}} for name, desc, props in TOOL_SPEC]
 
 
+
+def available_tools(settings: Settings) -> list[dict[str, Any]]:
+    """Avoid wasting prompt tokens on tools disallowed by the current permissions.
+
+    Runtime permission checks in Tools.execute are still enforced independently.
+    """
+    unavailable = set()
+    if not settings.allow_writes:
+        unavailable.update(("write_file", "edit_file"))
+    if not settings.allow_tests:
+        unavailable.add("run_checks")
+    return [tool for tool in TOOLS if tool["function"]["name"] not in unavailable]
+
+
 class Tools:
     def __init__(self, settings: Settings, store: Store, sid: str):
         self.s = settings
@@ -416,6 +430,7 @@ class Harness:
             elif not resume:
                 raise ValueError("Existing session needs a task or --resume")
         tools = Tools(self.settings, self.store, sid)
+        model_tools = available_tools(self.settings)
         for _ in range(self.settings.max_steps):
             row = self.store.load(sid)
             assert row is not None
@@ -435,7 +450,7 @@ class Harness:
                 self.store.finish(sid, self.settings.workspace, call, _clip(output))
                 continue
             messages = context_window(row["messages"], self.settings.max_context_chars)
-            reply = self.backend.complete(messages, TOOLS)
+            reply = self.backend.complete(messages, model_tools)
             tool_calls = reply.get("tool_calls") or []
             if not isinstance(tool_calls, list):
                 raise ModelError("Tool calls must be an array")
