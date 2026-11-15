@@ -124,6 +124,15 @@
     if (message.note) heading.append(textNode("small", "", message.note));
     const value = textNode("div", "message-content", message.content || (message.role === "assistant" ? "生成中…" : ""));
     body.append(heading, value);
+    if (message.role === "assistant") {
+      const details = document.createElement("details");
+      details.className = "reasoning-block";
+      const summary = textNode("summary", "", "Reasoning（モデルが提供した出力）");
+      const reasonText = textNode("div", "reasoning-content", message.reasoning || "");
+      details.append(summary, reasonText);
+      details.hidden = !message.reasoning;
+      body.append(details);
+    }
     if (message.role === "assistant" && message.content) {
       const actions = textNode("div", "message-actions", "");
       const copy = textNode("button", "small-button", "コピー");
@@ -160,7 +169,13 @@
     if (!el || !message) return;
     const content = el.querySelector(".message-content");
     const head = el.querySelector(".message-head");
-    if (content) content.textContent = message.content || "生成中…";
+    if (content) content.textContent = message.content || (message.reasoning ? "推論中…" : "生成中…");
+    const details = el.querySelector(".reasoning-block");
+    if (details) {
+      details.hidden = !message.reasoning;
+      const section = details.querySelector(".reasoning-content");
+      if (section) section.textContent = message.reasoning || "";
+    }
     const note = head.querySelector("small");
     if (note) note.textContent = message.note || "";
     else if (message.note) head.append(textNode("small", "", message.note));
@@ -249,6 +264,10 @@
       top_p: Number(ui.topP.value), max_tokens: Number(ui.maxTokens.value),
       stream: ui.stream.checked, x_ironasu_cache: true
     };
+    if (byId("autoload-toggle").checked && ui.model.value.startsWith("direct:")
+        && !ui.model.value.slice(7).startsWith("ironasu-local-")) {
+      payload.x_ironasu_autoload = true;
+    }
     if (ui.model.value.startsWith("direct:")) {
       payload.x_ironasu_model = ui.model.value.slice(7);
     } else {
@@ -265,6 +284,86 @@
     ).map((part) => part.text).join("");
     return "";
   }
+  function applySegment(answer, type, chunk) {
+    if (!chunk) return;
+    const tick = performance.now();
+    if (answer._firstToken == null) answer._firstToken = tick;
+    if (type === "reasoning") {
+      if (answer._reasoningStart == null) answer._reasoningStart = tick;
+      answer._reasoningEnd = tick;
+      answer.reasoning = (answer.reasoning || "") + chunk;
+    } else {
+      if (answer._answerStart == null) answer._answerStart = tick;
+      answer.content += chunk;
+    }
+  }
+
+  // Some local runners encode reasoning as <think>...</think> in content.
+  // Retain partial tags between stream chunks so boundaries are handled.
+  function appendTaggedContent(answer, value, flush = false) {
+    let text = (answer._tagPending || "") + value;
+    answer._tagPending = "";
+    while (text) {
+      const tag = answer._insideThink ? "</think>" : "<think>";
+      const index = text.indexOf(tag);
+      if (index >= 0) {
+        applySegment(answer, answer._insideThink ? "reasoning" : "answer", text.slice(0, index));
+        answer._insideThink = !answer._insideThink;
+        text = text.slice(index + tag.length);
+        continue;
+      }
+      let keep = 0;
+      if (!flush) {
+        for (let n = 1; n < tag.length && n <= text.length; n++) {
+          if (tag.startsWith(text.slice(-n))) keep = n;
+        }
+      }
+      applySegment(answer, answer._insideThink ? "reasoning" : "answer",
+                   keep ? text.slice(0, -keep) : text);
+      answer._tagPending = keep ? text.slice(-keep) : "";
+      break;
+    }
+  }
+
+  function extractReasoning(choice) {
+    const delta = choice?.delta || choice?.message || {};
+    if (typeof delta.reasoning_content === "string") return delta.reasoning_content;
+    if (typeof delta.reasoning === "string") return delta.reasoning;
+    if (typeof delta.reasoning?.text === "string") return delta.reasoning.text;
+    if (Array.isArray(delta.reasoning_details)) {
+      return delta.reasoning_details.filter((x) => typeof x?.text === "string")
+        .map((x) => x.text).join("");
+    }
+    return "";
+  }
+
+  function paintPerformance(answer, finished) {
+    const first = answer._firstToken;
+    const started = answer._started;
+    const elapsed = Math.max(0.001, (finished - started) / 1000);
+    const decodeDuration = first == null ? null : Math.max(0.001, (finished - first) / 1000);
+    const reasoningSpan = answer._reasoningStart == null ? null :
+      (answer._answerStart == null ? answer._reasoningEnd : answer._answerStart)
+      - answer._reasoningStart;
+    const ttft = first == null ? null : (first - started) / 1000;
+    byId("stat-ttft").textContent = ttft == null ? "—" : ttft.toFixed(2) + "s";
+    byId("stat-reasoning-time").textContent =
+      reasoningSpan == null ? "—" : (Math.max(0, reasoningSpan) / 1000).toFixed(2) + "s";
+    byId("stat-tokens-sec").textContent =
+      typeof answer.tokens === "number" && decodeDuration
+        ? (answer.tokens / decodeDuration).toFixed(1) : "—";
+    byId("stat-chars-sec").textContent =
+      answer.content ? (answer.content.length / elapsed).toFixed(0) : "—";
+    byId("perf-note").textContent =
+      "端末観測: " + elapsed.toFixed(2) + "秒（通信・待機込み）。"
+      + (ttft == null ? "TTFTは取得できません。"
+          : "TTFTは最初のReasoningまたは本文データ到着まで。")
+      + (typeof answer.tokens === "number"
+        ? " tok/sはモデル報告トークン数÷初回受信後の時間（参考値）。"
+        : " モデルがtoken usageを返さないためtok/sは非表示。")
+      + " Reasoning時間は受信区間でありモデル内部の思考時間ではありません。";
+  }
+
   async function streamCompletion(payload, answer, signal) {
     const response = await fetch("/v1/chat/completions", {
       method: "POST", headers: authHeaders(), body: JSON.stringify(payload), signal, cache: "no-store"
@@ -290,7 +389,10 @@
       try { chunk = JSON.parse(payloadLine); } catch (_) { return; }
       if (chunk.error) throw new Error(chunk.error.message || "ストリーミングエラー");
       for (const choice of (chunk.choices || [])) {
-        answer.content += extractContent(choice);
+        const reason = extractReasoning(choice);
+        if (reason) applySegment(answer, "reasoning", reason);
+        const content = extractContent(choice);
+        if (content) appendTaggedContent(answer, content);
       }
       if (chunk.usage && typeof chunk.usage.completion_tokens === "number") {
         answer.tokens = chunk.usage.completion_tokens;
@@ -311,6 +413,7 @@
       }
       buffer += decoder.decode();
       if (buffer.trim()) consume(buffer);
+      appendTaggedContent(answer, "", true);
       if (!sawDone && !signal.aborted) {
         // Some SSE servers do not send [DONE]; a clean close is tolerated.
       }
@@ -328,7 +431,7 @@
     session.messages.push({ role: "user", content: prompt });
     if (session.title === "新しいチャット") session.title = prompt.replace(/\s+/g, " ").slice(0, 38);
     ui.prompt.value = "";
-    const answer = { role: "assistant", content: "", note: "応答中" };
+    const answer = { role: "assistant", content: "", reasoning: "", note: "応答中" };
     session.messages.push(answer);
     persist();
     render();
@@ -339,6 +442,7 @@
     ui.model.disabled = true;
     controller = new AbortController();
     const began = performance.now();
+    answer._started = began;
     try {
       const payload = configPayload(session);
       if (payload.stream) {
@@ -347,17 +451,22 @@
         const data = await fetchJson("/v1/chat/completions", {
           method: "POST", body: JSON.stringify(payload), signal: controller.signal
         });
-        answer.content = extractContent(data.choices?.[0]);
+        const choice = data.choices?.[0];
+        answer.reasoning = extractReasoning(choice);
+        appendTaggedContent(answer, extractContent(choice), true);
+        // Non-streaming responses do not reveal first-token timing.
+        answer._firstToken = undefined;
+        answer._answerStart = undefined;
+        answer._reasoningStart = undefined;
+        answer._reasoningEnd = undefined;
         answer.tokens = data.usage?.completion_tokens;
         const meta = data._ironasu || {};
         answer.note = (meta.route || "upstream") + " · " + (meta.source || "upstream");
       }
       const seconds = (performance.now() - began) / 1000;
       answer.note = (answer.note === "応答中" ? "完了" : answer.note) + " · " + seconds.toFixed(1) + "秒";
-      if (typeof answer.tokens === "number" && seconds > 0.1) {
-        answer.note += " · " + (answer.tokens / seconds).toFixed(1) + " tok/s (端末計測)";
-      }
-      if (!answer.content) answer.content = "(テキスト応答はありませんでした)";
+      paintPerformance(answer, performance.now());
+      if (!answer.content) answer.content = "(本文のテキスト出力はありませんでした)";
       ui.meta.textContent = answer.note;
     } catch (error) {
       if (error.name === "AbortError") {
@@ -449,6 +558,8 @@
   const installError = byId("model-install-error");
   let lastCompleted = "";
   let modelRefreshBusy = false;
+  let pendingManagedSelection = false;
+  let lastManagedModel = null;
   const nativeControls = byId("native-controls");
   const nativePicker = byId("native-file-picker");
 
@@ -509,6 +620,28 @@
         }
         row.append(info);
         if (provider === "native") {
+          const start = textNode("button", "small-button", "GGUFを起動");
+          start.type = "button";
+          start.addEventListener("click", async () => {
+            start.disabled = true;
+            installError.textContent = "";
+            try {
+              const context = Number(byId("managed-context").value);
+              const gpuRaw = byId("managed-gpu").value;
+              const payload = { id: entry.id, context_length: context };
+              if (gpuRaw !== "") payload.gpu_layers = Number(gpuRaw);
+              await fetchJson("/ui/runtime/start", {
+                method: "POST", body: JSON.stringify(payload)
+              });
+              pendingManagedSelection = true;
+              await refreshManaged();
+            } catch (error) {
+              installError.textContent = error.message;
+            } finally {
+              start.disabled = false;
+            }
+          });
+          row.append(start);
           const copy = textNode("button", "small-button", "パスをコピー");
           copy.type = "button";
           copy.addEventListener("click", async () => {
@@ -680,6 +813,32 @@
     finally { button.disabled = false; }
   }
 
+  async function refreshManaged() {
+    try {
+      const status = await fetchJson("/ui/runtime/status");
+      byId("managed-runtime-state").textContent = status.state || "unknown";
+      byId("managed-runtime-detail").textContent =
+        (status.detail || "") + (status.model_id ? " · " + status.model_id : "")
+        + (!status.runtime_found ? " · llama-server実行ファイルが見つかりません" : "");
+      byId("stop-managed").disabled = !["running", "starting"].includes(status.state);
+      if (status.state === "running" && status.model_id && (
+          status.model_id !== lastManagedModel || pendingManagedSelection)) {
+        lastManagedModel = status.model_id;
+        await refreshStatus();
+        if (pendingManagedSelection) {
+          const option = Array.from(ui.model.options).find(
+            (x) => x.value === "direct:" + status.model_id);
+          if (option) ui.model.value = option.value;
+          pendingManagedSelection = false;
+        }
+      } else if (status.state === "failed") {
+        pendingManagedSelection = false;
+      }
+    } catch (error) {
+      byId("managed-runtime-detail").textContent = "状態取得失敗: " + error.message;
+    }
+  }
+
   function closeModelDialog() {
     modelDialog.hidden = true;
     // Do not interrupt a download: it is owned by the local model server.
@@ -689,7 +848,7 @@
     modelDialog.hidden = false;
     installError.textContent = "";
     updateModelExamples();
-    await Promise.all([refreshModelDownloads(), refreshInstalledModels()]);
+    await Promise.all([refreshModelDownloads(), refreshInstalledModels(), refreshManaged()]);
     installName.focus();
   });
   byId("close-model-manager").addEventListener("click", closeModelDialog);
@@ -712,6 +871,16 @@
       e.preventDefault();
       searchNative();
     }
+  });
+  byId("refresh-managed").addEventListener("click", refreshManaged);
+  byId("stop-managed").addEventListener("click", async () => {
+    try {
+      await fetchJson("/ui/runtime/stop", {method: "POST", body: "{}"});
+      pendingManagedSelection = false;
+      lastManagedModel = null;
+      await Promise.all([refreshStatus(), refreshManaged()]);
+      if (ui.model.value.startsWith("direct:ironasu-local-")) ui.model.value = "auto";
+    } catch (error) { installError.textContent = error.message; }
   });
   byId("refresh-downloads").addEventListener("click", refreshModelDownloads);
   byId("refresh-installed").addEventListener("click", refreshInstalledModels);
@@ -743,7 +912,10 @@
     }
   });
   setInterval(() => {
-    if (!modelDialog.hidden && !document.hidden) refreshModelDownloads();
+    if (!modelDialog.hidden && !document.hidden) {
+      refreshModelDownloads();
+      refreshManaged();
+    }
   }, 1800);
 
   load();

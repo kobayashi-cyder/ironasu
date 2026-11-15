@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ironasu"
-version = "1.4.0"
+version = "1.5.0"
 description = "Adaptive LLM gateway, out-of-core inference, coding harness and experimental speculation scheduling"
 requires-python = ">=3.10"
 license = {text = "MIT"}

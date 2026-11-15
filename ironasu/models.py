@@ -80,6 +80,7 @@ class ModelManager:
         self.max_download_seconds = max_download_seconds
         self._jobs: dict[str, DownloadJob] = {}
         self._lock = threading.RLock()
+        self._load_lock = threading.Lock()
         self._slots = threading.BoundedSemaphore(2)
 
     def _headers(self, provider: str) -> dict[str, str]:
@@ -159,6 +160,26 @@ class ModelManager:
         name, _ = _model_name(provider, model)
         result = self._json(provider, "/api/v1/models/load", {"model": name})
         return {"model": name, "status": result.get("status", "unknown")}
+
+    def ensure_loaded(self, provider: str, model: Any) -> dict[str, Any]:
+        """Explicit opt-in autoload before a chat request.
+
+        Never load arbitrary model strings: verify that the ID is installed
+        and belongs to the locally running LM Studio instance.
+        """
+        if provider != "lmstudio":
+            raise InferenceError("Autoload requires the local LM Studio API", 400)
+        name, _ = _model_name(provider, model)
+        with self._load_lock:
+            matches = [item for item in self.installed(provider) if item["id"] == name]
+            if not matches:
+                raise InferenceError("Selected model is not installed in LM Studio", 404)
+            if matches[0]["loaded"]:
+                return {"model": name, "status": "loaded", "already_loaded": True}
+            result = self.load(provider, name)
+            if result.get("status") != "loaded":
+                raise InferenceError("LM Studio did not confirm model loading", 502)
+            return result
 
     def list_jobs(self) -> list[dict[str, Any]]:
         with self._lock:
