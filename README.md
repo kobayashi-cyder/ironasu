@@ -1,38 +1,34 @@
 # ironasu
 
-**Local coding-agent harness for OpenAI-compatible LLMs, with a roadmap toward adaptive inference and low-memory model serving.**
+**Experimental local AI coding harness and bounded multi-agent orchestrator.**
 
-## What exists today (v0.2)
+ironasu originally targets compute-efficient use of large local models, including AirLLM-style weight paging. **The v0.3 implementation does not itself serve model weights, reduce dense inference FLOPs, or provide a GPU scheduler.** It coordinates calls to a separate OpenAI-compatible model backend.
 
-This repository currently provides a working Python **coding-agent harness**, including:
+## Implemented
 
-- A model → tool → model loop with bounded steps, persisted SQLite sessions and restart handling
-- Workspace file read/search/list, permission-gated atomic writing/editing, and fixed test commands
-- SHA256 preconditions for overwrites and explicit operator handling of crash-uncertain tools
-- Session-scoped durable notes and bounded context-window trimming
-- Standard-library-only runtime with unit tests and CI
+- **v0.2 Harness:** persistent tool-call sessions, local code inspection, permission-gated edits/checks, manual crash-uncertainty resolution, bounded context. See [Harness guide](docs/HARNESS.md).
+- **v0.3 Orchestrator:** default 16 logical agents, 2 simultaneous model requests, 4 simultaneous tool invocations *within one runner process*, durable dependency-aware task DAG, bounded priority aging, independent event cursors with explicit acknowledgement, a shared brief + event metadata, lease-fenced crash recovery, audited operator resolution, and unit/integration tests. See [Orchestrator guide](docs/ORCHESTRATOR.md).
 
-See [Harness guide](docs/HARNESS.md) for setup, permissions, limitations and recovery steps.
-
-## Quick start
+### Quick start
 
 ```bash
 python -m unittest discover -s tests -v
+python -m compileall -q ironasu tests
+
+python -m ironasu.orchestrator --workspace . submit examples/orchestration_plan.json
+python -m ironasu.orchestrator --workspace . status
+
 export IRONASU_BACKEND_URL=http://127.0.0.1:8080/v1
 export IRONASU_QUALITY_MODEL=qwen2.5-coder-7b
-python -m ironasu "Inspect this project and identify the biggest bottleneck" --workspace . --session trial
+python -m ironasu.orchestrator --workspace . run
 ```
 
-Use `--allow-writes` to let the agent change project files; use `--allow-tests` to execute test/check commands. Checks can execute arbitrary code already in the project: **run untrusted projects in a dedicated OS/container sandbox.** The connected model server must support `/v1/chat/completions` and function tool calls. This package does not start or download a model.
+Configure and start your own compatible LLM server separately. Source edits and running tests are disabled by default; add `--allow-writes` / `--allow-tests` after reviewing the task plan. This is **not a security sandbox**. Test changes in an isolated environment.
 
-## Project direction
+## What 16 agents means
 
-- **Harness layer:** durable task execution, approvals, context, tool integrations, subagents, scheduled workflows and evaluation.
-- **Inference gateway layer:** adaptive quality/fast routing, exact response cache, singleflight, backpressure, telemetry and optional backend speculative decoding.
-- **Low-memory runtime layer:** profiling, AirLLM-style streaming experiments, careful CPU/GPU placement and I/O optimizations.
+Sixteen distinct sessions can be busy on independent tasks, with at most two model HTTP requests and four tool executions running concurrently **in that single orchestrator process**. Other workers may be waiting. Agent summaries are small prompt inputs and shared event details are stored once; however, there is no guarantee that every agent has semantically understood everything. `critical-status` measures delivery acknowledgements rather than comprehension.
 
-The gateway and low-memory runtime layers above are **planned, not implemented here**. Streaming huge weights from SSD reduces peak memory but does not intrinsically reduce the dense model's arithmetic per token. No claim of unmeasured inference speedups or Grokbot feature parity is made.
+## Known gaps / roadmap
 
-## License
-
-MIT (a license file should be added before public distribution).
+This is not Grokbot feature parity: no automatic hierarchical planning, agent-to-agent chat, distributed inference semaphore, speculative decoding, production browsing/MCP integration, GPU KV-cache sharing, OS sandbox, AirLLM weight streaming, or sustained live-backend 16-agent benchmark. The baseline v0.2 implementation remains compatible; v0.3 is a separate module and CLI.
