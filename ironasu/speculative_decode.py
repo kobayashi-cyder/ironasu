@@ -96,7 +96,7 @@ class GreedySpeculativeDecoder:
             remaining = max_new_tokens - len(emitted)
             # A target pass can emit k+1 tokens. Restrict draft to remaining-1.
             limit = min(choice.draft_tokens, max(0, remaining - 1))
-            proposal = self.index.propose(history, limit) if limit else ()
+            proposal = self.index.propose(history[-self.index.order:], limit) if limit else ()
             self.synchronize()
             started = perf_counter()
             target_predictions = self.target(tuple(history), proposal)
@@ -114,8 +114,9 @@ class GreedySpeculativeDecoder:
                     self.scheduler.record_speculative(
                         len(proposal), result.accepted, elapsed, len(result.emitted))
                 else:
-                    # Tail-end partial drafts do not fit a calibrated arm.
-                    self.scheduler.record_baseline(elapsed, len(result.emitted))
+                    # An uncalibrated partial draft is neither a target-only
+                    # baseline nor an observation for a configured draft arm.
+                    pass
             else:
                 self.scheduler.record_baseline(elapsed, 1)
             # Stop at EOS; never append tokens beyond EOS even if the verifier
