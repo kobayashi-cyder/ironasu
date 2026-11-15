@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import json
-from math import isfinite
+from math import ceil, isfinite
 import os
 from pathlib import Path
 from statistics import median
@@ -35,7 +35,7 @@ class Completion:
 def _pct(values: list[float], percentile: int) -> float:
     if not values:
         raise ValueError("cannot summarize empty data")
-    return sorted(values)[(len(values) - 1) * percentile // 100]
+    return sorted(values)[max(0, ceil(len(values) * percentile / 100) - 1)]
 
 
 def summarize(completions: list[Completion]) -> dict:
