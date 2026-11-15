@@ -180,6 +180,16 @@ class LayerPager:
                 source_key = qualified if qualified in names else next(
                     (candidate for candidate in aliases[id(parameter)] if candidate in names), None
                 )
+                # The safetensors writer drops a tied lm_head duplicate.
+                # Under meta construction, Python Parameter identity may not
+                # reflect the weight tie declared by the model configuration.
+                if (source_key is None and qualified == "lm_head.weight"
+                        and getattr(getattr(model, "config", None), "tie_word_embeddings", False)):
+                    for candidate in ("model.embed_tokens.weight", "transformer.wte.weight",
+                                      "gpt_neox.embed_in.weight"):
+                        if candidate in names:
+                            source_key = candidate
+                            break
                 if source_key is None:
                     raise PagingError(f"No checkpoint tensor (or tied alias) for {qualified}")
                 parent, _, attr = local.rpartition(".")
