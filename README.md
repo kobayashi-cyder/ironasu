@@ -13,6 +13,13 @@ sequential tokens/s regression. Speculative cycle timing now includes draft
 lookup and scheduler overhead rather than only target execution. See
 [measurement commands and limitations](docs/performance-regression.md).
 
+**New: bounded admission and concurrent A/B load measurement.** The gateway
+limits waiting upstream calls and singleflight followers (default 32;
+`IRONASU_MAX_WAITING_REQUESTS=0` disables waiting); `/metrics` includes
+active/waiting gauges. `ironasu-benchmark-load` and `ironasu-load-gate`
+measure and validate actual overlapping HTTP workloads at user-selected
+concurrency levels. See [concurrent performance evaluation](docs/concurrent-load.md).
+
 See [implementation and validation](docs/runtime-validation.md). The
 production out-of-core performance, optimized CUDA weight prefetch, and
 architecture-specific Kimi KV handling still require real-device integration.
