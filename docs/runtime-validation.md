@@ -28,8 +28,11 @@ supported, it invalidates the cache and recomputes the next step against the
 full accepted prefix. Token generation is **greedy only**, without sampling or
 repetition penalties; don't claim parity with custom decoding processors.
 
-A `--speculative-ngram` invocation prints counters including target forward
-passes and accepted/proposed drafts. The adaptive policy starts with measured
+A `--speculative-ngram` invocation prints target forward passes,
+accepted/proposed drafts, target KV reuse/fallback, total generated tokens,
+wall-clock tokens/s, measured checkpoint payload bytes loaded, and CUDA peak
+allocated bytes where supported. Checkpoint payload bytes are **not** physical
+SSD I/O; CUDA peaks do not capture all memory consumers. The adaptive policy starts with measured
 non-speculative requests and uses speculation only after enough observations.
 It does not guarantee speculation will be chosen or that there will be enough
 N-gram matches to benefit. The optional path is deliberately OFF by default.
