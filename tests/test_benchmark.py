@@ -14,6 +14,8 @@ class BenchmarkTests(unittest.TestCase):
         )
         self.assertEqual(report["exact_output_match_rate"], 1.0)
         self.assertEqual(report["p50_latency_speedup"], 2.0)
+        self.assertEqual(report["p95_latency_speedup"], 2.0)
+        self.assertEqual(report["serialized_throughput_speedup"], 2.0)
         self.assertEqual(report["candidate"]["measured_output_tokens"], 48)
         self.assertEqual(report["candidate"]["throughput_tokens_per_wall_second"], 4.0)
 
@@ -26,6 +28,7 @@ class BenchmarkTests(unittest.TestCase):
         self.assertNotIn("SECRET PROMPT", str(report))
         self.assertNotIn("PRIVATE", str(report))
         self.assertIsNone(report["candidate"]["throughput_tokens_per_wall_second"])
+        self.assertIsNone(report["serialized_throughput_speedup"])
 
     def test_missing_usage_disables_token_throughput(self):
         report = summarize([Completion("x", 2, 10), Completion("x", 2, None)])
@@ -35,6 +38,12 @@ class BenchmarkTests(unittest.TestCase):
     def test_invalid_data_rejected(self):
         with self.assertRaises(ValueError):
             Completion("x", -1, 2)
+        with self.assertRaises(ValueError):
+            Completion("x", True, 1)
+        with self.assertRaises(ValueError):
+            Completion("x", 1.0, True)
+        with self.assertRaises(ValueError):
+            summarize([])
         with self.assertRaises(ValueError):
             compare([], baseline=lambda p: None, candidate=lambda p: None)
         with self.assertRaises(ValueError):
