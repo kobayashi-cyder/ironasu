@@ -1,5 +1,12 @@
 # ironasu Studio — オフラインで動くWeb UI
 
+**v1.5:** TTFT・推論速度の計測（正確なモデル内トークン速度ではなく端末観測値）、
+モデルから提供されたReasoningの別表示、LM Studioの明示的・任意の自動ロード、
+保存済みGGUFの `llama-server` を使った自動起動に対応。
+[ランタイム・推論性能・Reasoningの説明](runtime.md)を参照。
+llama-server実行ファイルは別途用意する必要があります。
+
+
 **v1.4:** LM StudioやOllamaを起動せずに、Hugging Faceから公開GGUFモデルを
 ironasuのローカル保存領域に直接取得できます。画面右上の「＋ モデルを追加」で
 「ironasuへ直接保存」を選び、モデルIDの検索、GGUFのサイズ選択、

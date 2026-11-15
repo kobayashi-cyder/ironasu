@@ -2,6 +2,14 @@
 
 ## ironasu Studio (offline Web UI)
 
+**New in v1.5:** TTFT/tok/s/Reasoning diagnostics, separate model-provided
+reasoning output, opt-in LM Studio autoload and **one-click startup of a saved
+GGUF** using an installed llama-server runtime. Model download and startup are
+managed in the local Web UI. The Windows package does not bundle llama.cpp;
+point `IRONASU_LLAMA_SERVER` to a trusted runner executable before using
+native GGUF chat. See [managed GGUF and performance guide](docs/runtime.md).
+
+
 **New in v1.4: Native GGUF installation without LM Studio or Ollama.**
 Search public Hugging Face models, inspect downloadable GGUF sizes, download
 verified weights to ironasu-managed local storage, resume incomplete transfers,

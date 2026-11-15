@@ -1,6 +1,6 @@
-# ironasu Studio installation and backend compatibility (v1.4)
+# ironasu Studio installation and backend compatibility (v1.5)
 
-v1.4は外部モデル管理アプリなしでも、Hugging Faceから公開GGUFモデルを
+v1.5は外部モデル管理アプリなしでも、Hugging Faceから公開GGUFモデルを
 直接保存できます。ダウンロードにはインターネット接続が必要ですが、
 保存済みモデルはオフラインで管理できます。推論には別途GGUF対応の実行エンジンが必要です。
 [ネイティブGGUFインストール](native-install.md)を参照してください。

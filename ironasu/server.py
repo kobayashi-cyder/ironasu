@@ -12,6 +12,8 @@ import webbrowser
 from .core import AdaptiveEngine, Config, InferenceError
 from .models import ModelManager
 from .native_models import NativeModelManager
+from .runtime import ManagedGGUFRuntime, RuntimeBackendMux
+from .core import HTTPBackend
 
 MAX_BODY_BYTES = 2 * 1024 * 1024
 ASSETS = {
@@ -29,7 +31,8 @@ CSP = (
 
 
 def make_handler(engine: AdaptiveEngine, models: ModelManager | None = None,
-                 native: NativeModelManager | None = None):
+                 native: NativeModelManager | None = None,
+                 managed: ManagedGGUFRuntime | None = None):
     """A handler factory so HTTP integration tests can use fake backends."""
     settings = engine.config
     models = models or ModelManager(settings)
@@ -82,6 +85,10 @@ def make_handler(engine: AdaptiveEngine, models: ModelManager | None = None,
                 })
             elif path == "/ui/models/downloads":
                 self._send(200, {"jobs": native.jobs() + models.list_jobs()})
+            elif path == "/ui/runtime/status":
+                self._send(200, managed.status() if managed is not None else
+                           {"state": "unavailable", "detail": "Managed GGUF runner is unavailable",
+                            "runtime_found": False, "model_id": None})
             elif path in ("/ui/models/installed", "/ui/models/native/files",
                           "/ui/models/native/search"):
                 try:
@@ -149,7 +156,8 @@ def make_handler(engine: AdaptiveEngine, models: ModelManager | None = None,
                 return
             path = urlsplit(self.path).path
             if path not in ("/v1/chat/completions", "/ui/models/download",
-                             "/ui/models/load", "/ui/models/native/cancel", "/ui/models/native/remove"):
+                             "/ui/models/load", "/ui/models/native/cancel",
+                             "/ui/models/native/remove", "/ui/runtime/start", "/ui/runtime/stop"):
                 self._send(404, {"error": {"message": "not found"}})
                 return
             if not self._same_origin():
@@ -157,8 +165,23 @@ def make_handler(engine: AdaptiveEngine, models: ModelManager | None = None,
                 return
             try:
                 request = self._read_json(
-                    cap=8192 if path.startswith("/ui/models/") else MAX_BODY_BYTES
+                    cap=8192 if path.startswith(("/ui/models/", "/ui/runtime/")) else MAX_BODY_BYTES
                 )
+                if path == "/ui/runtime/start":
+                    if managed is None:
+                        raise InferenceError("Managed runtime unavailable", 501)
+                    result = managed.start(
+                        request.get("id"),
+                        context_length=request.get("context_length", 4096),
+                        gpu_layers=request.get("gpu_layers"),
+                    )
+                    self._send(202, result)
+                    return
+                if path == "/ui/runtime/stop":
+                    if managed is None:
+                        raise InferenceError("Managed runtime unavailable", 501)
+                    self._send(200, managed.stop())
+                    return
                 if path == "/ui/models/download":
                     if request.get("provider") == "native":
                         result = native.start(request.get("model"), request.get("file"))
@@ -173,12 +196,36 @@ def make_handler(engine: AdaptiveEngine, models: ModelManager | None = None,
                     self._send(200, {"job": native.cancel(request.get("id", ""))})
                     return
                 if path == "/ui/models/native/remove":
+                    if managed is not None:
+                        running = managed.status()
+                        if (running["state"] in ("running", "starting")
+                                and running["installed_id"] == request.get("id")):
+                            raise InferenceError("Stop the managed model before deleting its GGUF", 409)
                     self._send(200, native.remove(request.get("id", "")))
                     return
                 if path == "/ui/models/load":
                     result = models.load(request.get("provider", ""), request.get("model"))
                     self._send(200, result)
                     return
+                if request.get("x_ironasu_autoload") is True:
+                    name = request.get("x_ironasu_model")
+                    if (not isinstance(name, str) or not name
+                            or name.startswith("ironasu-local-")):
+                        raise InferenceError(
+                            "LM Studio autoload requires an explicit LM Studio model ID", 409,
+                        )
+                    upstream = getattr(engine.backend, "upstream", engine.backend)
+                    origin_fn = getattr(upstream, "endpoint", None)
+                    endpoint = origin_fn() if callable(origin_fn) else {
+                        "url": settings.backend_url,
+                    }
+                    url = urlsplit(endpoint.get("url") or "")
+                    if (url.scheme != "http" or url.hostname not in ("127.0.0.1", "localhost")
+                            or url.port != 1234):
+                        raise InferenceError(
+                            "Autoload requires the active local LM Studio server on port 1234", 409,
+                        )
+                    models.ensure_loaded("lmstudio", name)
                 if request.get("stream") is True:
                     with engine.stream(request) as response:
                         self.send_response(200)
@@ -211,8 +258,14 @@ def make_handler(engine: AdaptiveEngine, models: ModelManager | None = None,
 
 def serve(config: Config | None = None, *, backend=None, open_browser: bool = False) -> None:
     settings = config or Config.from_env()
-    engine = AdaptiveEngine(settings, backend)
-    server = ThreadingHTTPServer((settings.listen_host, settings.listen_port), make_handler(engine))
+    native = NativeModelManager()
+    managed = ManagedGGUFRuntime(native)
+    upstream = backend if backend is not None else HTTPBackend(settings)
+    engine = AdaptiveEngine(settings, RuntimeBackendMux(upstream, managed))
+    server = ThreadingHTTPServer(
+        (settings.listen_host, settings.listen_port),
+        make_handler(engine, native=native, managed=managed),
+    )
     url = f"http://{settings.listen_host}:{server.server_port}/ui"
     print(f"ironasu ready at {url}", flush=True)
     if open_browser:
@@ -225,4 +278,5 @@ def serve(config: Config | None = None, *, backend=None, open_browser: bool = Fa
     except KeyboardInterrupt:
         pass
     finally:
+        managed.stop()
         server.server_close()

@@ -96,7 +96,17 @@
         <textarea id="system-prompt" rows="3" placeholder="任意: アシスタントの動作指示"></textarea>
       </div>
       <label class="check-line"><input type="checkbox" id="stream-toggle" checked> ストリーミング表示</label>
-      <p class="hint">Reasoningは無効化しません。対応モデルが返した内容のみ表示します。</p>
+      <label class="check-line"><input type="checkbox" id="autoload-toggle"> LM Studioモデルをチャット時に自動ロード（明示許可）</label>
+      <p class="hint">Reasoningは無効化しません。モデルが提供する思考出力のみ会話と分けて表示します。</p>
+      <div class="panel-divider"></div>
+      <div class="inspector-head"><h2>最後の推論（端末側計測）</h2></div>
+      <div class="stat-grid">
+        <div class="stat"><span>最初の生成まで TTFT</span><strong id="stat-ttft">—</strong></div>
+        <div class="stat"><span>生成速度 / tok/s</span><strong id="stat-tokens-sec">—</strong></div>
+        <div class="stat"><span>Reasoning受信時間</span><strong id="stat-reasoning-time">—</strong></div>
+        <div class="stat"><span>テキスト文字/秒</span><strong id="stat-chars-sec">—</strong></div>
+      </div>
+      <p class="hint" id="perf-note">TTFTとReasoning受信時間はブラウザの観測値です。実際の内部思考時間とは異なります。tok/sはAPIのtoken usageが提供された場合に限り表示します。</p>
 
       <div class="panel-divider"></div>
       <div class="inspector-head"><h2>推論状況</h2><button class="text-button" id="refresh-status">更新 ⟳</button></div>
@@ -164,6 +174,23 @@
       <div class="panel-divider"></div>
       <div class="inspector-head"><h3>保存済みモデル</h3><button type="button" class="text-button" id="refresh-installed">更新 ⟳</button></div>
       <div id="installed-model-list" class="downloads-list"><span class="muted">一覧を確認中…</span></div>
+      <div class="panel-divider"></div>
+      <div class="inspector-head"><h3>ironasu 管理GGUFの起動</h3><button class="text-button" type="button" id="refresh-managed">更新 ⟳</button></div>
+      <p class="hint">対応する <code>llama-server</code> 実行ファイルをインストール済みなら、外部アプリを手動起動せずにGGUFをロードできます。モデル重みだけでは推論できません。</p>
+      <div class="managed-config">
+        <label for="managed-context">コンテキスト長</label>
+        <input id="managed-context" type="number" min="512" max="131072" step="512" value="4096">
+        <label for="managed-gpu">GPUレイヤー</label>
+        <select id="managed-gpu">
+          <option value="">自動（ランタイム既定値）</option>
+          <option value="0">0（CPUのみ）</option>
+          <option value="24">24</option>
+          <option value="99">99（最大付近）</option>
+        </select>
+      </div>
+      <div class="health-line"><span>管理ランタイム</span><strong id="managed-runtime-state">未確認</strong></div>
+      <p class="hint" id="managed-runtime-detail">起動するGGUFを保存済み一覧から選択してください。</p>
+      <button id="stop-managed" class="secondary full" type="button">管理モデルを停止</button>
     </section>
   </div>
   <div class="key-overlay" id="key-overlay" hidden>

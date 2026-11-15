@@ -143,3 +143,15 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 .native-controls .hint{margin:1px 0 0}
 .model-result .small-button{flex-shrink:0;white-space:nowrap}
 @media(max-width:510px){.native-search-line{flex-direction:column}.model-result{flex-wrap:wrap}}
+
+
+/* Model-provided reasoning: never fabricated, never rendered as HTML. */
+.reasoning-block{margin:14px 0 12px;background:#18262b;border:1px solid #345650;border-radius:10px;padding:10px 12px;max-width:100%}
+.reasoning-block summary{cursor:pointer;color:#a8dbcb;font-size:11px;font-weight:700;line-height:1.5}
+.reasoning-content{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;color:#aebfc6;line-height:1.7;margin-top:12px;max-height:360px;overflow-y:auto}
+.managed-config{display:grid;grid-template-columns:1fr 1fr;gap:8px 10px;margin:12px 0}
+.managed-config label{font-size:11px;color:#b7cbce;align-self:end}
+.managed-config input,.managed-config select{min-width:0;width:100%;border:1px solid #42565f;border-radius:8px;background:#1f2a35;color:#e9f5f0;padding:9px;font-size:12px}
+.model-result{flex-wrap:wrap}
+.model-result .small-button{flex-shrink:0}
+@media(max-width:500px){.managed-config{grid-template-columns:1fr}}
