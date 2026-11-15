@@ -129,7 +129,7 @@ class DesktopWindow:
         self.root.geometry("1320x840")
         self.root.minsize(940, 590)
         self.root.configure(bg=BACKGROUND)
-        self.root.option_add("*Font", "Segoe UI 10")
+        self.root.option_add("*Font", "{Segoe UI} 10")
         self.root.option_add("*insertBackground", FOREGROUND)
         style = ttk.Style(self.root)
         style.theme_use("clam")
