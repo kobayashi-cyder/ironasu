@@ -172,7 +172,8 @@ class LayerPager:
     def __init__(self, model: Any, index: SafetensorsIndex, *, device: str = "cpu",
                  sync_timing: bool = False, prefetch: bool = False,
                  cpu_cache_mb: int = 0, pin_stages: list[str] | None = None,
-                 expert_paging: bool = False, expert_cache_mb: int = 0):
+                 expert_paging: bool = False, expert_cache_mb: int = 0,
+                 prefetch_mode: str = "fixed"):
         torch, _ = _deps()
         self.model = model
         self.index = index
@@ -183,6 +184,13 @@ class LayerPager:
             raise PagingError("CUDA device requested but CUDA is not available")
         self.sync_timing = sync_timing
         self.prefetch = prefetch
+        if prefetch_mode not in ("fixed", "adaptive"):
+            raise PagingError("prefetch_mode must be fixed or adaptive")
+        if prefetch_mode == "adaptive" and not prefetch:
+            raise PagingError("adaptive prefetch requires prefetch=True")
+        self.prefetch_mode = prefetch_mode
+        from .prefetch_policy import AdaptivePrefetchGate
+        self._prefetch_gate = AdaptivePrefetchGate() if prefetch_mode == "adaptive" else None
         if type(expert_paging) is not bool:
             raise PagingError("expert_paging must be a boolean")
         if type(expert_cache_mb) is not int or expert_cache_mb < 0:
@@ -447,19 +455,26 @@ class LayerPager:
                 self._ahead = None
                 stale.cancel()
                 if not stale.cancelled():
-                    stale.result()
+                    _, stale_read_seconds = stale.result()
+                    if self._prefetch_gate is not None:
+                        self._prefetch_gate.observe(used=False, read_seconds=stale_read_seconds)
             if self._ahead is not None and self._ahead[0] == stage.name:
                 _, future = self._ahead
                 self._ahead = None
                 tensors, disk_seconds = future.result()
-                self._traces[stage.name]["prefetch_wait_seconds"] += perf_counter() - wait_started
+                elapsed_wait = perf_counter() - wait_started
+                self._traces[stage.name]["prefetch_wait_seconds"] += elapsed_wait
+                if self._prefetch_gate is not None:
+                    self._prefetch_gate.observe(
+                        used=True, read_seconds=disk_seconds, wait_seconds=elapsed_wait)
             else:
                 tensors, disk_seconds = self._load_stage_cpu(stage)
             self._traces[stage.name]["disk_seconds"] += disk_seconds
             # At most one future holds the *next* stage's weights on CPU.
             if self._executor is not None and stage.name in self._next:
-                following = self._next[stage.name]
-                self._ahead = (following.name, self._executor.submit(self._load_stage_cpu, following))
+                if self._prefetch_gate is None or self._prefetch_gate.should_submit():
+                    following = self._next[stage.name]
+                    self._ahead = (following.name, self._executor.submit(self._load_stage_cpu, following))
             start = perf_counter()
             try:
                 for slot in stage.slots:
@@ -584,7 +599,9 @@ class LayerPager:
                     future.cancel()
                     if not future.cancelled():
                         # A worker can already be reading. Wait before discarding its buffer.
-                        future.result()
+                        _, stale_read_seconds = future.result()
+                        if self._prefetch_gate is not None:
+                            self._prefetch_gate.observe(used=False, read_seconds=stale_read_seconds)
                     self._ahead = None
                 self._busy = False
 
@@ -600,6 +617,8 @@ class LayerPager:
                 "per_expert": {name: dict(data) for name, data in self._expert_trace.items()},
             },
             "prefetch": self.prefetch,
+            "prefetch_scheduler": (self._prefetch_gate.snapshot() if self._prefetch_gate
+                                   is not None else {"mode": self.prefetch_mode}),
             "resident_stage_count": len(self._resident),
             "cpu_cache": {
                 "policy": "fixed_admission",

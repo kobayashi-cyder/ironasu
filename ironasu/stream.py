@@ -31,7 +31,8 @@ class PagedCausalLM:
                        q4_dir: str | Path | None = None,
                        expert_paging: bool = False, expert_cache_mb: int = 0,
                        use_mxfp4: bool = False, kv_cache_mb: int = 0,
-                       kv_cache_entries: int = 8) -> "PagedCausalLM":
+                       kv_cache_entries: int = 8,
+                       prefetch_mode: str = "fixed") -> "PagedCausalLM":
         try:
             import torch
             from accelerate import init_empty_weights
@@ -58,7 +59,8 @@ class PagedCausalLM:
         pager = LayerPager(model, index, device=device, sync_timing=sync_timing,
                            prefetch=prefetch, cpu_cache_mb=cpu_cache_mb,
                            pin_stages=pin_stages, expert_paging=expert_paging,
-                           expert_cache_mb=expert_cache_mb)
+                           expert_cache_mb=expert_cache_mb,
+                           prefetch_mode=prefetch_mode)
         return cls(model, tokenizer, pager,
                    kv_cache_mb=kv_cache_mb, kv_cache_entries=kv_cache_entries)
 
@@ -111,6 +113,8 @@ def main() -> None:
     parser.add_argument("--q4-dir", default=None, help="optional separately packed ironasu Q4 checkpoint; lossy")
     parser.add_argument("--profile", action="store_true", help="synchronize CUDA for stage timing; slower")
     parser.add_argument("--prefetch", action="store_true", help="bounded one-stage CPU prefetch; needs extra RAM")
+    parser.add_argument("--prefetch-mode", choices=("fixed", "adaptive"), default="fixed",
+                        help="adaptive mode temporarily skips unhelpful speculative reads")
     parser.add_argument("--cpu-cache-mb", type=int, default=0,
                         help="pin up to this many MiB of selected checkpoint tensors in CPU RAM; 0 disables")
     parser.add_argument("--pin-stage", action="append", default=None,
@@ -138,6 +142,8 @@ def main() -> None:
         parser.error("--repeat must be in 1..100")
     if args.kv_cache_mb < 0 or not 1 <= args.kv_cache_entries <= 128:
         parser.error("--kv-cache-mb must be >=0 and --kv-cache-entries in 1..128")
+    if args.prefetch_mode == "adaptive" and not args.prefetch:
+        parser.error("--prefetch-mode adaptive requires --prefetch")
     selected = {"prefetch": args.prefetch, "cpu_cache_mb": args.cpu_cache_mb,
                 "pin_stages": args.pin_stage}
     if args.native_mxfp4 and args.q4_dir is not None:
@@ -162,7 +168,7 @@ def main() -> None:
         q4_dir=args.q4_dir, expert_paging=args.expert_paging,
         expert_cache_mb=args.expert_cache_mb, use_mxfp4=args.native_mxfp4,
         kv_cache_mb=args.kv_cache_mb, kv_cache_entries=args.kv_cache_entries,
-        **selected,
+        prefetch_mode=args.prefetch_mode, **selected,
     )
     try:
         for _ in range(args.repeat):
