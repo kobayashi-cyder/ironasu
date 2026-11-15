@@ -29,7 +29,7 @@ jobs:
           python -m compileall -q ironasu tests
       - name: Check bundled offline Studio assets in wheel
         run: |
-          python -m pip wheel . --no-deps --no-build-isolation --wheel-dir dist
+          python -m pip wheel . --no-deps --wheel-dir dist
           python - <<'PY'
           from pathlib import Path
           from zipfile import ZipFile
