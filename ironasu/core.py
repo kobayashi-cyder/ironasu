@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict, defaultdict, deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 import json
@@ -81,11 +82,54 @@ class HTTPBackend:
     def __init__(self, config: Config):
         self.config = config
 
-    def complete(self, payload: dict[str, Any]) -> dict[str, Any]:
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    def _headers(self, accept: str = "application/json") -> dict[str, str]:
+        headers = {"Content-Type": "application/json", "Accept": accept}
         if self.config.backend_key:
             headers["Authorization"] = f"Bearer {self.config.backend_key}"
+        return headers
+
+    def open_stream(self, payload: dict[str, Any]):
+        """Open upstream SSE before sending HTTP 200 to the caller."""
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = Request(
+            self.config.backend_url.rstrip("/") + "/chat/completions",
+            data=data, headers=self._headers("text/event-stream"), method="POST",
+        )
+        try:
+            response = urlopen(req, timeout=self.config.request_timeout_s)
+            if "text/event-stream" not in response.headers.get("Content-Type", "").lower():
+                response.close()
+                raise InferenceError("upstream does not provide SSE streaming", 502)
+            return response
+        except HTTPError as exc:
+            raise InferenceError(f"upstream returned HTTP {exc.code}", 502) from exc
+        except (URLError, TimeoutError, OSError, ValueError) as exc:
+            raise InferenceError("upstream streaming unavailable", 502) from exc
+
+    def list_models(self) -> list[str] | None:
+        """Best-effort discovery; never send upstream credentials to the browser."""
+        req = Request(self.config.backend_url.rstrip("/") + "/models",
+                      headers=self._headers(), method="GET")
+        try:
+            with urlopen(req, timeout=min(3.0, self.config.request_timeout_s)) as response:
+                raw = response.read(262145)
+            if len(raw) > 262144:
+                return None
+            catalog = json.loads(raw)
+            entries = catalog.get("data", []) if isinstance(catalog, dict) else []
+            if not isinstance(entries, list):
+                return None
+            return list(dict.fromkeys(
+                entry["id"] for entry in entries[:200]
+                if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+                and 0 < len(entry["id"]) <= 256
+            ))
+        except (HTTPError, URLError, OSError, TimeoutError, ValueError):
+            return None
+
+    def complete(self, payload: dict[str, Any]) -> dict[str, Any]:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers = self._headers()
         req = Request(
             self.config.backend_url.rstrip("/") + "/chat/completions",
             data=data, headers=headers, method="POST",
@@ -243,11 +287,7 @@ class AdaptiveEngine:
             raise InferenceError("messages must be a nonempty list of objects", 400)
         if payload.get("stream"):
             raise InferenceError("streaming is not yet supported", 400)
-        mode = payload.get("x_ironasu_mode", "auto")
-        if mode not in ("auto", "fast", "quality"):
-            raise InferenceError("x_ironasu_mode must be auto, fast, or quality", 400)
-        route = _route(messages, mode, self.metrics.is_pressured())
-        model = self.config.fast_model if route == "fast" else self.config.quality_model
+        route, model = self._select_model(payload, messages)
         request = {k: v for k, v in payload.items() if not k.startswith("x_ironasu_")}
         request["model"] = model
         request.pop("stream", None)
@@ -321,6 +361,76 @@ class AdaptiveEngine:
                 with self._flight_lock:
                     self._inflight.pop(key, None)
                     event.set()
+
+    def _select_model(
+        self, payload: dict[str, Any], messages: list[dict[str, Any]]
+    ) -> tuple[str, str]:
+        mode = payload.get("x_ironasu_mode", "auto")
+        if mode not in ("auto", "fast", "quality"):
+            raise InferenceError("x_ironasu_mode must be auto, fast, or quality", 400)
+        direct = payload.get("x_ironasu_model")
+        if direct is not None:
+            if (not isinstance(direct, str) or not 0 < len(direct) <= 256
+                    or any(ord(c) < 32 for c in direct)):
+                raise InferenceError("invalid x_ironasu_model", 400)
+            return "direct", direct
+        if mode == "auto":
+            if payload.get("model") == "ironasu-fast":
+                mode = "fast"
+            elif payload.get("model") == "ironasu-quality":
+                mode = "quality"
+        route = _route(messages, mode, self.metrics.is_pressured())
+        return route, (self.config.fast_model if route == "fast" else self.config.quality_model)
+
+    @contextmanager
+    def stream(self, payload: dict[str, Any]):
+        """Bounded, uncached SSE passthrough. No tool execution or disk state."""
+        if not isinstance(payload, dict):
+            raise InferenceError("request must be a JSON object", 400)
+        messages = payload.get("messages")
+        if not isinstance(messages, list) or not messages or not all(
+            isinstance(item, dict) for item in messages
+        ):
+            raise InferenceError("messages must be a nonempty list of objects", 400)
+        if payload.get("stream") is not True:
+            raise InferenceError("stream must be true", 400)
+        if "x_ironasu_files" in payload:
+            raise InferenceError("streaming with code-context retrieval is not supported", 400)
+        route, model = self._select_model(payload, messages)
+        request = {k: v for k, v in payload.items() if not k.startswith("x_ironasu_")}
+        request["model"] = model
+        request["stream"] = True
+        if not hasattr(self.backend, "open_stream"):
+            raise InferenceError("this backend does not support streaming", 501)
+        queued = time.perf_counter()
+        acquired = self._slots.acquire(blocking=False)
+        if not acquired:
+            self._reserve_waiter()
+            try:
+                acquired = self._slots.acquire(timeout=self.config.queue_timeout_s)
+            finally:
+                self._release_waiter()
+        wait_s = time.perf_counter() - queued
+        if not acquired:
+            self.metrics.bump("overloads")
+            raise InferenceError("queue is saturated; retry later", 503)
+        self.metrics.adjust_admission(active_delta=1)
+        started = time.perf_counter()
+        failed = False
+        try:
+            with self.backend.open_stream(request) as response:
+                yield response
+        except Exception:
+            failed = True
+            raise
+        finally:
+            self.metrics.record(route, time.perf_counter() - started, wait_s, failed)
+            self.metrics.adjust_admission(active_delta=-1)
+            self._slots.release()
+
+    def upstream_models(self) -> list[str] | None:
+        discover = getattr(self.backend, "list_models", None)
+        return discover() if callable(discover) else None
 
     def _reserve_waiter(self) -> None:
         if not self._waiters.acquire(blocking=False):

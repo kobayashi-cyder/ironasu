@@ -15,6 +15,9 @@ stream = ["torch>=2.4", "safetensors>=0.4", "transformers>=4.49,<5", "accelerate
 [tool.setuptools.packages.find]
 include = ["ironasu*"]
 
+[tool.setuptools.package-data]
+"ironasu.web" = ["*.html", "*.css", "*.js"]
+
 [project.scripts]
 ironasu = "ironasu.server:serve"
 ironasu-harness = "ironasu.harness:main"

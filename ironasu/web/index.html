@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>ironasu Studio</title>
+  <link rel="stylesheet" href="/ui/ui.css">
+  <script defer src="/ui/ui.js"></script>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" id="sidebar" aria-label="チャット履歴">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">i</span>
+        <span><strong>ironasu</strong><small>STUDIO</small></span>
+        <button class="icon-button mobile-close" id="close-menu" aria-label="メニューを閉じる">×</button>
+      </div>
+      <button class="new-chat" id="new-chat"><span aria-hidden="true">＋</span> 新しいチャット</button>
+      <div class="side-label">セッション</div>
+      <nav class="session-list" id="session-list" aria-label="セッション一覧"></nav>
+      <div class="side-bottom">
+        <label class="check-line"><input type="checkbox" id="persist-history"> このブラウザに履歴を保存</label>
+        <p class="hint">履歴は端末のブラウザ内だけに保存されます。ONでは暗号化されません。</p>
+        <button class="secondary full" id="export-chat">現在のチャットをエクスポート ↓</button>
+        <div class="version">ironasu · Local inference gateway</div>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <button class="icon-button menu-button" id="open-menu" aria-label="メニューを開く">☰</button>
+        <div class="header-title"><strong id="chat-title">新しいチャット</strong><small>ローカル推論ワークスペース</small></div>
+        <div class="header-actions">
+          <label class="model-select">
+            <span>モデル</span>
+            <select id="model-select" aria-label="推論モデル">
+              <option value="auto">自動ルーティング</option>
+              <option value="fast">高速モデル</option>
+              <option value="quality">高品質モデル</option>
+            </select>
+          </label>
+          <button class="status-pill" id="connection-status" title="接続状態を更新"><span class="dot"></span><span id="connection-text">確認中</span></button>
+          <button class="icon-button inspector-toggle" id="toggle-inspector" aria-label="設定パネルを切り替える">⚙</button>
+        </div>
+      </header>
+
+      <section class="conversation" aria-label="会話">
+        <div class="welcome" id="welcome">
+          <div class="welcome-logo">i</div>
+          <div class="eyebrow">LOCAL-FIRST AI WORKSPACE</div>
+          <h1>何を考えましょうか？</h1>
+          <p>ローカルLLMとつながる、軽量な開発・推論インターフェース。自動ルーティングは必要に応じてモデルを選びます。</p>
+          <div class="suggestions">
+            <button class="suggestion" data-prompt="このPythonコードを高速化する考え方を説明してください。">⚡ コードを最適化する</button>
+            <button class="suggestion" data-prompt="量子化と推論速度のトレードオフを整理してください。">◈ 推論の仕組みを調べる</button>
+            <button class="suggestion" data-prompt="リポジトリのテスト戦略を設計してください。">⌘ 開発プランを作る</button>
+          </div>
+        </div>
+        <div class="messages" id="messages" role="log" aria-live="polite" aria-label="メッセージ"></div>
+      </section>
+
+      <div class="composer-area">
+        <div class="error-banner" id="error-banner" role="alert" hidden></div>
+        <form id="chat-form" class="composer">
+          <label class="sr-only" for="prompt">メッセージ</label>
+          <textarea id="prompt" rows="2" maxlength="100000" placeholder="メッセージを入力…（Enterで送信 / Shift+Enterで改行）"></textarea>
+          <div class="composer-bottom">
+            <div class="composer-info" id="completion-meta">ローカルAPI · 会話は選択中のバックエンドに送信されます</div>
+            <button class="send-button" id="send-button" type="submit">送信 <span aria-hidden="true">↑</span></button>
+            <button class="stop-button" id="stop-button" type="button" hidden>■ 停止</button>
+          </div>
+        </form>
+        <div class="keyboard-hint">Ctrl+Enter / ⌘+Enter でも送信できます · AIの回答は検証してください</div>
+      </div>
+    </main>
+
+    <aside class="inspector" id="inspector" aria-label="推論設定とメトリクス">
+      <div class="inspector-head"><h2>Runtime</h2><span class="tag">LIVE</span></div>
+      <p class="section-description">推論設定</p>
+      <div class="field">
+        <label for="temperature">Temperature <output id="temperature-label">0.7</output></label>
+        <input id="temperature" type="range" min="0" max="1.5" step="0.05" value="0.7">
+      </div>
+      <div class="field">
+        <label for="top-p">Top P <output id="top-p-label">0.95</output></label>
+        <input id="top-p" type="range" min="0.05" max="1" step="0.05" value="0.95">
+      </div>
+      <div class="field">
+        <label for="max-tokens">Max tokens</label>
+        <input id="max-tokens" type="number" min="64" max="8192" step="64" value="1024">
+      </div>
+      <div class="field">
+        <label for="system-prompt">System prompt</label>
+        <textarea id="system-prompt" rows="3" placeholder="任意: アシスタントの動作指示"></textarea>
+      </div>
+      <label class="check-line"><input type="checkbox" id="stream-toggle" checked> ストリーミング表示</label>
+      <p class="hint">Reasoningは無効化しません。対応モデルが返した内容のみ表示します。</p>
+
+      <div class="panel-divider"></div>
+      <div class="inspector-head"><h2>推論状況</h2><button class="text-button" id="refresh-status">更新 ⟳</button></div>
+      <div class="stat-grid">
+        <div class="stat"><span>実行中</span><strong id="stat-active">—</strong></div>
+        <div class="stat"><span>待機中</span><strong id="stat-waiting">—</strong></div>
+        <div class="stat"><span>キャッシュ</span><strong id="stat-cache">—</strong></div>
+        <div class="stat"><span>上流呼び出し</span><strong id="stat-calls">—</strong></div>
+      </div>
+      <div class="health-line"><span>負荷状態</span><strong id="pressure-status">—</strong></div>
+      <div class="health-line"><span>高速モデル</span><code id="fast-model">—</code></div>
+      <div class="health-line"><span>高品質モデル</span><code id="quality-model">—</code></div>
+      <div class="panel-divider"></div>
+      <div class="inspector-head"><h2>上流のモデル</h2><span class="tag neutral" id="model-count">—</span></div>
+      <p class="hint">表示はバックエンドの /v1/models によります。実際のロード・アンロードはLM Studioなどのバックエンド側で行います。</p>
+      <div class="model-list" id="backend-models"><span class="muted">モデルを確認中…</span></div>
+      <div class="panel-divider"></div>
+      <div class="hint">API: <code>/v1/chat/completions</code><br>Models: <code>/v1/models</code><br>Metrics: <code>/metrics</code></div>
+    </aside>
+  </div>
+  <div class="screen-scrim" id="scrim" hidden></div>
+  <div class="key-overlay" id="key-overlay" hidden>
+    <div class="key-card" role="dialog" aria-modal="true" aria-labelledby="key-heading">
+      <div class="welcome-logo small">i</div>
+      <h2 id="key-heading">アクセスキーが必要です</h2>
+      <p>IRONASU_SERVER_KEY を入力してください。キーはメモリ内だけで扱い、ブラウザには保存しません。</p>
+      <form id="key-form">
+        <label for="access-key">Bearer token</label>
+        <input type="password" id="access-key" autocomplete="off" required>
+        <button class="send-button full" type="submit">接続する</button>
+      </form>
+      <p class="error-text" id="key-error" role="alert"></p>
+    </div>
+  </div>
+</body>
+</html>
