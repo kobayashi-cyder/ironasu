@@ -9,7 +9,29 @@ The original goal is to use huge models on low-memory hardware, inspired by AirL
 
 This initial version targets **total inference work across real requests**, rather than claiming to accelerate each individual 70B/405B token. It sits in front of LocalAI, llama.cpp's OpenAI-compatible server, or any compatible service.
 
-## Implemented (v0.1 prototype)
+## Current implementation status
+
+The original README described a future v0.1 gateway as if it were already
+implemented; the repository previously contained only this README. In the
+`feature/adaptive-speculation-prefetch` branch, the actual implemented code
+is the **experimental, backend-independent** module
+`ironasu/scheduling.py`, including:
+
+- A bounded, per-session **hash-table N-gram draft proposer**. Its output is
+  unverified and must **never** be sent directly to the user.
+- A **measurement-gated speculation policy** that chooses a draft length only
+  when a verifier-capable backend is explicitly available, resource pressure
+  is low, and measured decode-cycle latency justifies it.
+- An **ordered, bounded layer prefetch pipeline** that overlaps a layer's
+  loading with another layer's execution through an injected backend loader.
+- Unit tests: `python -m unittest discover -s tests -v`.
+
+**Not yet implemented:** the OpenAI-compatible proxy, AirLLM-compatible
+weight streaming and CUDA synchronization, GPU-side multi-token verification,
+real target/draft model integration, or any measured hardware speedup.
+See [scheduler experiment design](docs/scheduler-experiment.md).
+
+## Planned gateway capabilities (not implemented)
 
 1. **Exact response cache:** identical, deterministic (`temperature: 0`) non-tool calls reuse responses within a configurable TTL; repeated inference is skipped.
 2. **Singleflight:** concurrent identical requests share one upstream call rather than all computing the same result.
@@ -20,7 +42,7 @@ This initial version targets **total inference work across real requests**, rath
 
 **Important:** heuristic routing can reduce answer quality. Compare answers against a fixed coding-task evaluation set before changing defaults. There is no automatic layer-skipping or training in this prototype.
 
-## Quick start
+## Planned gateway quick start (not yet executable)
 
 Requires Python 3.10+; proxy itself has **no runtime dependencies**.
 
@@ -43,14 +65,14 @@ curl http://127.0.0.1:8765/metrics
 
 Connect Continue/VS Code to `http://127.0.0.1:8765/v1` with model name `ironasu`. **Streaming is not supported yet**; configure non-streaming requests.
 
-## Request controls
+## Planned request controls
 
 - `x_ironasu_mode`: `auto` (default), `fast`, `quality`.
 - `x_ironasu_cache`: `true` (default) or `false`. Caching applies only when `temperature=0` and there are no tools/tool_choice. Time-sensitive requests should set `false`.
 - Response `_ironasu.route`: `fast` or `quality`; `_ironasu.source`: `upstream`, `cache`, or `singleflight`.
 - `stream=true` currently returns HTTP 400 instead of silently pretending streaming works.
 
-## Configuration
+## Proposed gateway configuration
 
 | Environment variable | Default | Purpose |
 |---|---|---|
@@ -80,7 +102,7 @@ Run the *same* fixed collection of programming tasks with the same token budget 
 
 The first easy win is skipping entire duplicate calls (exactly one avoided invocation per cache hit). Routing can reduce FLOPs but its savings depend on model and prompt; benchmark locally. **Zero speedup guarantees** for new/unique, complex requests routed to the large model.
 
-## Next experiments (not implemented)
+## Next runtime integration experiments (not implemented)
 
 - Pluggable AirLLM profiling: separate disk load time, host↔device transfer, attention, MLP/MoE and decoding.
 - CPU↔GPU layer prefetch and bounded asynchronous I/O with hardware measurements.
