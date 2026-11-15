@@ -18,7 +18,9 @@ class PagedCausalLM:
         self.pager = pager
 
     @classmethod
-    def from_local_dir(cls, directory: str | Path, *, device: str = "cpu", sync_timing: bool = False, prefetch: bool = False) -> "PagedCausalLM":
+    def from_local_dir(cls, directory: str | Path, *, device: str = "cpu",
+                       sync_timing: bool = False, prefetch: bool = False,
+                       cpu_cache_mb: int = 0, pin_stages: list[str] | None = None) -> "PagedCausalLM":
         try:
             import torch
             from accelerate import init_empty_weights
@@ -33,7 +35,9 @@ class PagedCausalLM:
             model = AutoModelForCausalLM.from_config(config, trust_remote_code=False, attn_implementation="eager")
         model.eval()
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
-        pager = LayerPager(model, index, device=device, sync_timing=sync_timing, prefetch=prefetch)
+        pager = LayerPager(model, index, device=device, sync_timing=sync_timing,
+                           prefetch=prefetch, cpu_cache_mb=cpu_cache_mb,
+                           pin_stages=pin_stages)
         return cls(model, tokenizer, pager)
 
     def generate(self, prompt: str, *, max_new_tokens: int = 16) -> str:
@@ -67,8 +71,16 @@ def main() -> None:
     parser.add_argument("--tokens", type=int, default=8)
     parser.add_argument("--profile", action="store_true", help="synchronize CUDA for stage timing; slower")
     parser.add_argument("--prefetch", action="store_true", help="bounded one-stage CPU prefetch; needs extra RAM")
+    parser.add_argument("--cpu-cache-mb", type=int, default=0,
+                        help="pin up to this many MiB of selected checkpoint tensors in CPU RAM; 0 disables")
+    parser.add_argument("--pin-stage", action="append", default=None,
+                        help="cache only this stage (repeatable); e.g. lm_head, model.embed_tokens")
     args = parser.parse_args()
-    engine = PagedCausalLM.from_local_dir(args.model_dir, device=args.device, sync_timing=args.profile, prefetch=args.prefetch)
+    engine = PagedCausalLM.from_local_dir(
+        args.model_dir, device=args.device, sync_timing=args.profile,
+        prefetch=args.prefetch, cpu_cache_mb=args.cpu_cache_mb,
+        pin_stages=args.pin_stage,
+    )
     try:
         print(engine.generate(args.prompt, max_new_tokens=args.tokens))
         print(json.dumps(engine.pager.snapshot(), ensure_ascii=False, indent=2))

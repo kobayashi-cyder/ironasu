@@ -14,7 +14,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from threading import RLock
+from threading import Lock, RLock
 from time import perf_counter
 from typing import Any, Iterator
 import json
@@ -69,6 +69,38 @@ class SafetensorsIndex:
 
     def keys(self) -> set[str]:
         return set(self.paths)
+
+    def tensor_byte_sizes(self, names: list[str]) -> dict[str, int]:
+        """Estimate exact checkpoint payload sizes without loading full tensors.
+
+        Inspects safetensors headers using ``get_slice``, not ``get_tensor``.
+        These byte counts exclude headers, allocator overhead and page cache.
+        """
+        _, safe_open = _deps()
+        sizes = {
+            "F64": 8, "F32": 4, "F16": 2, "BF16": 2,
+            "I64": 8, "U64": 8, "I32": 4, "U32": 4,
+            "I16": 2, "U16": 2, "I8": 1, "U8": 1,
+            "BOOL": 1, "F8_E4M3": 1, "F8_E5M2": 1,
+        }
+        grouped: dict[Path, list[str]] = defaultdict(list)
+        for name in dict.fromkeys(names):
+            if name not in self.paths:
+                raise PagingError(f"checkpoint tensor missing: {name}")
+            grouped[self.paths[name]].append(name)
+        result: dict[str, int] = {}
+        for path, keys in grouped.items():
+            with safe_open(str(path), framework="pt", device="cpu") as source:
+                for key in keys:
+                    view = source.get_slice(key)
+                    dtype = view.get_dtype()
+                    if dtype not in sizes:
+                        raise PagingError(f"Unsupported checkpoint dtype for byte estimate: {dtype}")
+                    count = 1
+                    for dimension in view.get_shape():
+                        count *= dimension
+                    result[key] = count * sizes[dtype]
+        return result
 
     def read(self, names: list[str]) -> dict[str, Any]:
         _, safe_open = _deps()
@@ -137,7 +169,9 @@ class LayerPager:
     constructed with meta *parameters* (e.g. accelerate.init_empty_weights).
     """
 
-    def __init__(self, model: Any, index: SafetensorsIndex, *, device: str = "cpu", sync_timing: bool = False, prefetch: bool = False):
+    def __init__(self, model: Any, index: SafetensorsIndex, *, device: str = "cpu",
+                 sync_timing: bool = False, prefetch: bool = False,
+                 cpu_cache_mb: int = 0, pin_stages: list[str] | None = None):
         torch, _ = _deps()
         self.model = model
         self.index = index
@@ -148,6 +182,20 @@ class LayerPager:
             raise PagingError("CUDA device requested but CUDA is not available")
         self.sync_timing = sync_timing
         self.prefetch = prefetch
+        if isinstance(cpu_cache_mb, bool) or not isinstance(cpu_cache_mb, int) or cpu_cache_mb < 0:
+            raise PagingError("cpu_cache_mb must be a nonnegative integer")
+        if pin_stages is not None and cpu_cache_mb == 0:
+            raise PagingError("pin_stages requires cpu_cache_mb > 0")
+        self._cpu_cache_budget = cpu_cache_mb * (1024 ** 2)
+        self._cpu_cache_bytes = 0
+        self._cpu_cache_lock = Lock()
+        self._cpu_cache: dict[str, dict[str, Any]] = {}
+        self._cpu_cache_hit_count = 0
+        self._cpu_cache_miss_count = 0
+        self._disk_read_bytes = 0
+        self._avoided_read_bytes = 0
+        self._pin_stage_names: set[str] = set()
+        self._pin_stage_budget: dict[str, int] = {}
         self._executor: ThreadPoolExecutor | None = None
         self._ahead: tuple[str, Future] | None = None
         self._run_started: dict[str, float] = {}
@@ -158,6 +206,7 @@ class LayerPager:
         self._traces: dict[str, dict[str, float | int]] = defaultdict(lambda: {
             "disk_seconds": 0.0, "transfer_seconds": 0.0, "compute_seconds": 0.0,
             "loads": 0, "peak_simultaneous_stages": 0, "prefetch_wait_seconds": 0.0,
+            "cache_hits": 0, "cache_misses": 0, "disk_read_bytes": 0,
         })
         self._resident: set[str] = set()
         self._stages: list[_Stage] = []
@@ -180,9 +229,9 @@ class LayerPager:
                 source_key = qualified if qualified in names else next(
                     (candidate for candidate in aliases[id(parameter)] if candidate in names), None
                 )
-                # The safetensors writer drops a tied lm_head duplicate.
-                # Under meta construction, Python Parameter identity may not
-                # reflect the weight tie declared by the model configuration.
+                # `save_pretrained(safe_serialization=True)` drops duplicate
+                # tied lm_head weights. On meta, accelerate/Transformers may not
+                # preserve Python Parameter identity even when config says tied.
                 if (source_key is None and qualified == "lm_head.weight"
                         and getattr(getattr(model, "config", None), "tie_word_embeddings", False)):
                     for candidate in ("model.embed_tokens.weight", "transformer.wte.weight",
@@ -210,6 +259,42 @@ class LayerPager:
             raise PagingError(f"Unsupported non-streamed parameters: {unexpected[:5]}")
         if not self._stages or not any(s.slots for s in self._stages):
             raise PagingError("No streamable parameters found")
+        if self._cpu_cache_budget:
+            # Static admission is deliberate. An LRU over a model much larger
+            # than RAM may evict *every* layer during each decode token and
+            # achieve zero hits. Pin a stable subset across token iterations.
+            stage_by_name = {stage.name: stage for stage in self._stages}
+            if pin_stages is not None:
+                if len(set(pin_stages)) != len(pin_stages):
+                    raise PagingError("duplicate pin_stages entry")
+                missing = set(pin_stages) - stage_by_name.keys()
+                if missing:
+                    raise PagingError(f"Unknown pin_stages: {sorted(missing)}")
+                candidates = [stage_by_name[name] for name in pin_stages]
+            else:
+                # Prioritize output head and embedding, then sequential blocks.
+                # Stage sizes are derived from tensor headers; tied weights in
+                # different stages are budgeted independently, conservatively.
+                priority = {"lm_head": 0, "embed_out": 0,
+                            "model.embed_tokens": 1, "transformer.wte": 1,
+                            "gpt_neox.embed_in": 1}
+                candidates = sorted(self._stages,
+                                    key=lambda item: priority.get(item.name, 2))
+            # A single header scan per shard avoids reopening the same shard
+            # for every decoder block during the cache admission pass.
+            checkpoint_sizes = index.tensor_byte_sizes([
+                slot.checkpoint_name for stage in candidates for slot in stage.slots
+            ])
+            remaining = self._cpu_cache_budget
+            for stage in candidates:
+                if not stage.slots:
+                    continue
+                keys = list(dict.fromkeys(slot.checkpoint_name for slot in stage.slots))
+                estimated = sum(checkpoint_sizes[key] for key in keys)
+                if estimated <= remaining:
+                    self._pin_stage_names.add(stage.name)
+                    self._pin_stage_budget[stage.name] = estimated
+                    remaining -= estimated
         # Model-level nonpersistent buffers (rotary cache, attention masks) can be
         # needed outside streamed modules. Keep these small buffers resident.
         # GPU inference must not mix a CUDA activation with a CPU attention mask.
@@ -233,9 +318,34 @@ class LayerPager:
             torch.cuda.synchronize(self.device)
 
     def _load_stage_cpu(self, stage: _Stage):
+        # The worker thread may be reading the next stage while the main thread
+        # performs model.forward. Protect statistics and dictionary mutation.
+        keys = list(dict.fromkeys(x.checkpoint_name for x in stage.slots))
+        with self._cpu_cache_lock:
+            cached = self._cpu_cache.get(stage.name)
+            if cached is not None:
+                self._cpu_cache_hit_count += 1
+                self._traces[stage.name]["cache_hits"] += 1
+                self._avoided_read_bytes += self._pin_stage_budget[stage.name]
+                return cached, 0.0
+            self._cpu_cache_miss_count += 1
+            self._traces[stage.name]["cache_misses"] += 1
         started = perf_counter()
-        data = self.index.read(list(dict.fromkeys(x.checkpoint_name for x in stage.slots)))
-        return data, perf_counter() - started
+        data = self.index.read(keys)
+        elapsed = perf_counter() - started
+        size_bytes = sum(t.numel() * t.element_size() for t in data.values())
+        # Conservative upper bound of what this stage has read from safetensors.
+        with self._cpu_cache_lock:
+            self._disk_read_bytes += size_bytes
+            self._traces[stage.name]["disk_read_bytes"] += size_bytes
+            if (stage.name in self._pin_stage_names and
+                    self._cpu_cache_bytes + size_bytes <= self._cpu_cache_budget):
+                # Do NOT cache a corrupt/incompatible checkpoint tensor.
+                expected = {slot.checkpoint_name: slot.shape for slot in stage.slots}
+                if all(tuple(data[key].shape) == shape for key, shape in expected.items()):
+                    self._cpu_cache[stage.name] = data
+                    self._cpu_cache_bytes += size_bytes
+        return data, elapsed
 
     def _make_pre(self, stage: _Stage):
         def hook(module: Any, arguments: Any) -> None:
@@ -338,6 +448,17 @@ class LayerPager:
             "stage_count": len(self._stages),
             "prefetch": self.prefetch,
             "resident_stage_count": len(self._resident),
+            "cpu_cache": {
+                "policy": "fixed_admission",
+                "budget_bytes": self._cpu_cache_budget,
+                "occupied_bytes": self._cpu_cache_bytes,
+                "planned_stages": sorted(self._pin_stage_names),
+                "cached_stages": sorted(self._cpu_cache),
+                "hits": self._cpu_cache_hit_count,
+                "misses": self._cpu_cache_miss_count,
+                "disk_read_bytes": self._disk_read_bytes,
+                "avoided_read_bytes": self._avoided_read_bytes,
+            },
             "per_stage": {stage: dict(data) for stage, data in self._traces.items()},
             "warning": "Load times include page cache; CUDA computation times are enqueue-only unless sync_timing=True. Model FLOPs are unchanged.",
         }
@@ -352,6 +473,8 @@ class LayerPager:
             self._hooks.clear()
             for stage in self._stages:
                 self._evict(stage)
+            self._cpu_cache.clear()
+            self._cpu_cache_bytes = 0
             self._closed = True
 
     def __enter__(self) -> "LayerPager":

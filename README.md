@@ -234,3 +234,53 @@ mostly covers enqueue and host bookkeeping. **No throughput improvement or FLOPs
 saving is claimed until measured against a matching baseline and checked for
 correct outputs**. The optional HF smoke test builds a tiny model locally without
 network downloads; it runs only when `transformers` and `accelerate` are installed.
+
+
+## v0.4: Bounded CPU weight cache (no 70B performance claim)
+
+For long autoregressive generations, a very large model can re-read the same
+weights from checkpoint shards for **every** token. The new optional
+`--cpu-cache-mb` setting retains a **fixed subset of complete stages** in CPU
+memory. It does not cache arbitrary weight slices, skip decoder blocks, change
+model outputs, or reduce the model's arithmetic FLOPs.
+
+```bash
+python -m ironasu.stream ./models/qwen2-local --prompt 'Explain this code' \
+  --device cpu --tokens 8 --cpu-cache-mb 1024
+
+# Explicitly prioritize useful stages within the same memory budget:
+python -m ironasu.stream ./models/qwen2-local --prompt 'Hello' \
+  --device cuda --tokens 8 --cpu-cache-mb 2048 \
+  --pin-stage lm_head --pin-stage model.embed_tokens
+```
+
+The cache is **off by default**, to avoid unexpected RAM use on laptops with
+16GB total system memory. When enabled, checkpoint tensor *headers* are
+inspected without materializing the entire checkpoint. The static admission
+policy prioritizes the output head and token embedding, then decoder stages;
+explicit `--pin-stage` overrides that order. A stage is only retained if its
+**entire** checkpoint payload fits within the remaining fixed byte budget.
+Entries are never evicted just because a much larger model is streamed through
+RAM; that would cause a sequential LRU scan to thrash. All cached tensors are
+released by `close()`.
+
+`pager.snapshot()['cpu_cache']` reports `budget_bytes`, `occupied_bytes`,
+`planned_stages`, `cached_stages`, `hits`, `misses`, `disk_read_bytes`, and
+`avoided_read_bytes`. These byte counters measure the **logical safetensors
+payloads requested** and avoided by this cache; they are *not* measurements of
+physical SSD I/O. OS page cache, safetensors memory mapping, and GPU transfers
+make physical I/O different. `prefetch=True` remains compatible with caching,
+but may temporarily allocate an additional stage-sized CPU buffer beyond the
+configured cache budget. Peak overall RSS includes model activations, KV cache,
+Python/PyTorch allocation, and staging, so `--cpu-cache-mb` is **not a total
+process RAM limit**.
+
+The cache uses CPU RAM even for CUDA inference. It avoids checkpoint reads on
+cache hits, but GPU weights are still copied for each forward; USB4/eGPU
+transfer costs are **not** eliminated. For SSD-bound workloads, compare output
+parity and wall time with `--cpu-cache-mb 0` against a fixed cache budget on
+identical prompts. If useful weights are larger than the budget or the bottleneck
+is compute/transfer, a speedup may be zero. Synthetic unit tests validate
+correctness and cache hits. Optional CI integration generates tiny GPT-2 and
+Qwen2 models locally and verifies greedy multi-token parity, but full-size Qwen,
+70B, MoE, FP8, CUDA and the target ASUS remain unverified.

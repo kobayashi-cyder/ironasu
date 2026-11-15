@@ -5,7 +5,7 @@ import unittest
 try:
     import torch
     from accelerate import init_empty_weights
-    from transformers import AutoConfig, AutoModelForCausalLM, GPT2Config
+    from transformers import AutoConfig, AutoModelForCausalLM, GPT2Config, Qwen2Config
     HAVE_DEPS = True
 except ImportError:
     HAVE_DEPS = False
@@ -34,7 +34,8 @@ class RealTransformersTests(unittest.TestCase):
                     with pager.session() as model:
                         second = model(ids, use_cache=True)
                 torch.testing.assert_close(first.logits, second.logits, atol=1e-5, rtol=1e-5)
-                # Compare greedy generation including two KV-cache decoding steps.
+                # Greedy autoregressive generation must also match, including
+                # the KV-cache path over more than one decoding step.
                 with torch.inference_mode():
                     normal_tokens = direct.generate(ids, max_new_tokens=2, do_sample=False,
                                                     eos_token_id=None, pad_token_id=2)
@@ -43,6 +44,41 @@ class RealTransformersTests(unittest.TestCase):
                                                          do_sample=False, eos_token_id=None,
                                                          pad_token_id=2)
                 torch.testing.assert_close(normal_tokens, streamed_tokens, rtol=0, atol=0)
+                self.assertTrue(all(p.device.type == "meta" for p in empty.parameters()))
+
+    def test_tiny_qwen2_parity_with_cpu_cache(self):
+        """Exercise a locally generated Qwen2 architecture, no HF download."""
+        config = Qwen2Config(
+            vocab_size=64, hidden_size=32, intermediate_size=64,
+            num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
+            max_position_embeddings=64, tie_word_embeddings=False,
+            bos_token_id=1, eos_token_id=2,
+        )
+        torch.manual_seed(17)
+        direct = AutoModelForCausalLM.from_config(config, attn_implementation="eager").eval()
+        ids = torch.tensor([[3, 4, 5, 6]], dtype=torch.long)
+        with tempfile.TemporaryDirectory() as tmp:
+            direct.save_pretrained(tmp, safe_serialization=True)
+            with init_empty_weights(include_buffers=False):
+                empty = AutoModelForCausalLM.from_config(
+                    AutoConfig.from_pretrained(tmp, local_files_only=True),
+                    attn_implementation="eager",
+                ).eval()
+            with LayerPager(empty, SafetensorsIndex(tmp), cpu_cache_mb=1) as pager:
+                with torch.inference_mode():
+                    first = direct(ids, use_cache=True)
+                    with pager.session() as model:
+                        second = model(ids, use_cache=True)
+                torch.testing.assert_close(first.logits, second.logits, atol=1e-5, rtol=1e-5)
+                with torch.inference_mode():
+                    normal_tokens = direct.generate(ids, max_new_tokens=3, do_sample=False,
+                                                    eos_token_id=None, pad_token_id=2)
+                    with pager.session() as model:
+                        streamed_tokens = model.generate(ids, max_new_tokens=3,
+                                                         do_sample=False, eos_token_id=None,
+                                                         pad_token_id=2)
+                torch.testing.assert_close(normal_tokens, streamed_tokens, rtol=0, atol=0)
+                self.assertGreater(pager.snapshot()["cpu_cache"]["hits"], 0)
                 self.assertTrue(all(p.device.type == "meta" for p in empty.parameters()))
 
 

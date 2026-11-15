@@ -115,6 +115,64 @@ class StreamingTests(unittest.TestCase):
             self.assertEqual(pager.snapshot()["resident_stage_count"], 0)
             self.assertTrue(all(p.device.type == "meta" for p in self.meta.parameters()))
 
+    def test_stable_cpu_cache_reuses_exact_weights(self):
+        before = self.source(self.ids)
+        with LayerPager(self.meta, self.index, cpu_cache_mb=1) as pager:
+            for _ in range(3):
+                with pager.session() as model:
+                    torch.testing.assert_close(model(self.ids), before, rtol=0, atol=0)
+            trace = pager.snapshot()
+            cache = trace["cpu_cache"]
+            self.assertEqual(cache["policy"], "fixed_admission")
+            self.assertEqual(cache["hits"], 10)
+            self.assertEqual(cache["misses"], 5)
+            self.assertEqual(len(cache["cached_stages"]), 5)
+            self.assertGreater(cache["avoided_read_bytes"], 0)
+            self.assertGreater(cache["disk_read_bytes"], 0)
+            self.assertLessEqual(cache["occupied_bytes"], cache["budget_bytes"])
+            self.assertEqual(cache["budget_bytes"], 1024 * 1024)
+        self.assertEqual(pager.snapshot()["cpu_cache"]["occupied_bytes"], 0)
+
+    def test_pin_stage_allowlist_does_not_cache_other_stages(self):
+        with LayerPager(self.meta, self.index, cpu_cache_mb=1,
+                        pin_stages=["lm_head"]) as pager:
+            for _ in range(2):
+                with pager.session() as model:
+                    torch.testing.assert_close(model(self.ids), self.source(self.ids), rtol=0, atol=0)
+            cache = pager.snapshot()["cpu_cache"]
+            self.assertEqual(cache["planned_stages"], ["lm_head"])
+            self.assertEqual(cache["cached_stages"], ["lm_head"])
+            self.assertEqual(cache["hits"], 1)
+            self.assertEqual(cache["misses"], 9)
+
+    def test_cache_and_prefetch_together(self):
+        with LayerPager(self.meta, self.index, cpu_cache_mb=1, prefetch=True) as pager:
+            for _ in range(2):
+                with pager.session() as model:
+                    torch.testing.assert_close(model(self.ids), self.source(self.ids), rtol=0, atol=0)
+            self.assertEqual(pager.snapshot()["cpu_cache"]["hits"], 5)
+
+    def test_invalid_cache_settings_are_rejected(self):
+        for budget in (-1, 1.1, True):
+            with self.subTest(budget=budget), self.assertRaises(PagingError):
+                LayerPager(self.meta, self.index, cpu_cache_mb=budget)
+        with self.assertRaises(PagingError):
+            LayerPager(self.meta, self.index, pin_stages=["lm_head"])
+        with self.assertRaises(PagingError):
+            LayerPager(self.meta, self.index, cpu_cache_mb=1, pin_stages=["unknown"])
+        with self.assertRaises(PagingError):
+            LayerPager(self.meta, self.index, cpu_cache_mb=1,
+                       pin_stages=["lm_head", "lm_head"])
+
+    def test_safetensors_metadata_only_byte_count(self):
+        sizes = self.index.tensor_byte_sizes([
+            "model.embed_tokens.weight", "model.layers.0.weight",
+            "model.layers.0.weight",
+        ])
+        self.assertEqual(sizes["model.embed_tokens.weight"], 17 * 8 * 4)
+        self.assertEqual(sizes["model.layers.0.weight"], 8 * 8 * 4)
+        self.assertEqual(len(sizes), 2)
+
     def test_checkpoint_index_shards(self):
         weights = self.source.state_dict()
         a = {k: v.detach().contiguous() for k, v in weights.items() if "layers." in k}
