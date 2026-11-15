@@ -1,5 +1,13 @@
 # ironasu Studio — オフラインで動くWeb UI
 
+**v1.4:** LM StudioやOllamaを起動せずに、Hugging Faceから公開GGUFモデルを
+ironasuのローカル保存領域に直接取得できます。画面右上の「＋ モデルを追加」で
+「ironasuへ直接保存」を選び、モデルIDの検索、GGUFのサイズ選択、
+SHA-256検証、途中再開、キャンセル、インストール済みファイルの削除が可能です。
+**ダウンロードと推論エンジンによる実行は別機能**です。
+詳しくは [ネイティブGGUFインストール](native-install.md)。
+
+
 Windows用のインストーラー（Python不要）と各LLMサーバーの接続方法は [インストールと互換性](install.md) を参照してください。`ironasu-studio` コマンドはローカルサーバーの自動検出、モデルID自動選択、ブラウザ起動に対応します。元の `python -m ironasu` も引き続き利用できます。
 
 **ironasu Studio** は LM Studio風の操作感を持つ、追加ランタイム依存のないWeb UIです。

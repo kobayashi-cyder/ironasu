@@ -11,6 +11,7 @@ import webbrowser
 
 from .core import AdaptiveEngine, Config, InferenceError
 from .models import ModelManager
+from .native_models import NativeModelManager
 
 MAX_BODY_BYTES = 2 * 1024 * 1024
 ASSETS = {
@@ -27,10 +28,12 @@ CSP = (
 )
 
 
-def make_handler(engine: AdaptiveEngine, models: ModelManager | None = None):
+def make_handler(engine: AdaptiveEngine, models: ModelManager | None = None,
+                 native: NativeModelManager | None = None):
     """A handler factory so HTTP integration tests can use fake backends."""
     settings = engine.config
     models = models or ModelManager(settings)
+    native = native or NativeModelManager()
 
     class Handler(BaseHTTPRequestHandler):
         def _send_bytes(self, code: int, data: bytes, content_type: str) -> None:
@@ -78,11 +81,19 @@ def make_handler(engine: AdaptiveEngine, models: ModelManager | None = None):
                     ],
                 })
             elif path == "/ui/models/downloads":
-                self._send(200, {"jobs": models.list_jobs()})
-            elif path == "/ui/models/installed":
-                provider = parse_qs(parsed.query).get("provider", [""])[0]
+                self._send(200, {"jobs": native.jobs() + models.list_jobs()})
+            elif path in ("/ui/models/installed", "/ui/models/native/files",
+                          "/ui/models/native/search"):
                 try:
-                    self._send(200, {"models": models.installed(provider)})
+                    qs = parse_qs(parsed.query)
+                    if path == "/ui/models/native/files":
+                        self._send(200, {"files": native.files(qs.get("repo", [""])[0])})
+                    elif path == "/ui/models/native/search":
+                        self._send(200, {"models": native.search(qs.get("q", [""])[0])})
+                    else:
+                        provider = qs.get("provider", [""])[0]
+                        self._send(200, {"models": native.installed() if provider == "native"
+                                         else models.installed(provider)})
                 except InferenceError as exc:
                     self._send(exc.status, {"error": {"message": str(exc)}})
             elif path == "/ui/status":
@@ -137,7 +148,8 @@ def make_handler(engine: AdaptiveEngine, models: ModelManager | None = None):
                 self._send(401, {"error": {"message": "unauthorized"}})
                 return
             path = urlsplit(self.path).path
-            if path not in ("/v1/chat/completions", "/ui/models/download", "/ui/models/load"):
+            if path not in ("/v1/chat/completions", "/ui/models/download",
+                             "/ui/models/load", "/ui/models/native/cancel", "/ui/models/native/remove"):
                 self._send(404, {"error": {"message": "not found"}})
                 return
             if not self._same_origin():
@@ -148,11 +160,20 @@ def make_handler(engine: AdaptiveEngine, models: ModelManager | None = None):
                     cap=8192 if path.startswith("/ui/models/") else MAX_BODY_BYTES
                 )
                 if path == "/ui/models/download":
-                    result = models.start(
-                        request.get("provider", ""), request.get("model"),
-                        request.get("quantization"),
-                    )
+                    if request.get("provider") == "native":
+                        result = native.start(request.get("model"), request.get("file"))
+                    else:
+                        result = models.start(
+                            request.get("provider", ""), request.get("model"),
+                            request.get("quantization"),
+                        )
                     self._send(202, {"job": result})
+                    return
+                if path == "/ui/models/native/cancel":
+                    self._send(200, {"job": native.cancel(request.get("id", ""))})
+                    return
+                if path == "/ui/models/native/remove":
+                    self._send(200, native.remove(request.get("id", "")))
                     return
                 if path == "/ui/models/load":
                     result = models.load(request.get("provider", ""), request.get("model"))

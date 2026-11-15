@@ -33,7 +33,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--host", help="ironasu bind host (default: 127.0.0.1; non-local requires IRONASU_SERVER_KEY)")
     p.add_argument("--no-browser", action="store_true", help="Do not automatically open the UI browser tab")
     p.add_argument("--doctor", action="store_true", help="Probe configured local backend and exit")
-    p.add_argument("--version", action="version", version="ironasu Studio 1.3.0")
+    p.add_argument("--version", action="version", version="ironasu Studio 1.4.0")
     return p
 
 

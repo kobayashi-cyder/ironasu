@@ -132,3 +132,14 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 .model-result-text{min-width:0;flex:1}
 @media(max-width:750px){.model-install-trigger{padding:7px;font-size:10px}.model-dialog{padding:16px}.model-dialog-overlay{padding:8px}}
 @media(max-width:450px){.model-install-trigger{font-size:0}.model-install-trigger::after{content:"＋ モデル";font-size:11px}}
+
+
+/* Native GGUF discovery and file selection */
+.native-controls{display:flex;flex-direction:column;gap:9px;margin-top:10px;padding:14px;border-radius:11px;border:1px solid #364e4a;background:#12272250}
+.native-controls label{font-size:11px;color:#b9d6c8;margin:2px 0}
+.native-search-line{display:flex;align-items:stretch;gap:8px}
+.native-search-line input,.native-search-line select{flex:1;min-width:0}
+.native-search-line .secondary{white-space:nowrap;font-size:11px;padding:8px 12px}
+.native-controls .hint{margin:1px 0 0}
+.model-result .small-button{flex-shrink:0;white-space:nowrap}
+@media(max-width:510px){.native-search-line{flex-direction:column}.model-result{flex-wrap:wrap}}

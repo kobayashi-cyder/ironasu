@@ -1,4 +1,10 @@
-# ironasu Studio: モデルの直接インストール（v1.3）
+# ironasu Studio: モデルのインストール（v1.4）
+
+**v1.4以降はLM Studio/Ollamaを使わず、公開GGUFをironasuに直接保存できます。**
+モデル管理画面の「ironasuへ直接保存」を選択してください。詳しくは
+[ネイティブGGUFインストール](native-install.md)を参照してください。
+
+以下はv1.3から継続提供するLM Studio/Ollama経由の取得方法です。
 
 ironasu Studioの右上に追加された **「＋ モデルを追加」** から、ローカルモデルサーバー自身に
 モデルを取得させます。**ironasuが巨大な重みファイルを再ダウンロードしたり、
