@@ -239,6 +239,65 @@ class OrchestratorTests(unittest.TestCase):
         self.assertLessEqual(counters['peak_tool'], 4)
         self.assertEqual(o.status()['counts']['complete'], 16)
 
+    def test_workspace_gate_serializes_mutations(self):
+        lock = threading.Lock()
+        active = [0]
+        peak = [0]
+
+        class FakeBackend:
+            def __init__(self, settings):
+                pass
+
+            def complete(self, messages, specs):
+                if any(m.get('role') == 'tool' for m in messages):
+                    return {'role': 'assistant', 'content': 'done'}
+                return {'role': 'assistant', 'content': None, 'tool_calls': [
+                    {'id': 'edit', 'function': {'name': 'edit_file',
+                                              'arguments': '{"path":"x", "old":"a", "new":"b"}'}}]}
+
+        def fake_tool(tools, name, args):
+            with lock:
+                active[0] += 1
+                peak[0] = max(peak[0], active[0])
+            time.sleep(0.015)
+            with lock:
+                active[0] -= 1
+            return 'ok'
+
+        o = Orchestrator(self.root, max_agents=8, max_active_inference=2,
+                         max_parallel_tools=4, lease_seconds=4)
+        o.submit([{'id': f't{i}', 'prompt': 'edit'} for i in range(8)])
+        with patch('ironasu.orchestrator.OpenAIBackend', FakeBackend), \
+             patch('ironasu.harness.Tools.execute', fake_tool):
+            output = o.run()
+        self.assertEqual({r['state'] for r in output}, {'complete'})
+        self.assertEqual(peak[0], 1)
+
+    def test_symlinked_state_directory_rejected(self):
+        with tempfile.TemporaryDirectory() as destination:
+            (self.root / '.ironasu').symlink_to(destination, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, 'symlinked'):
+                self.build()
+
+    def test_two_orchestrators_do_not_double_claim_tasks(self):
+        seen = []
+        lock = threading.Lock()
+
+        def runner(agent, task, prompt):
+            with lock:
+                seen.append(task)
+            time.sleep(0.015)
+            return 'ok'
+
+        first = self.build(runner=runner)
+        second = self.build(runner=runner)
+        first.submit([{'id': f't{i}', 'prompt': 'work'} for i in range(12)])
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(lambda o: o.run(), [first, second]))
+        self.assertEqual(len(seen), 12)
+        self.assertEqual(len(set(seen)), 12)
+        self.assertEqual(first.status()['counts']['complete'], 12)
+
     def test_persistent_across_instances(self):
         o1 = self.build(runner=lambda a, b, c: 'complete')
         o1.submit([{'id': 'a', 'prompt': 'durable'}])
