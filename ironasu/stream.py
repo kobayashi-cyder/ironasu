@@ -23,7 +23,17 @@ class PagedCausalLM:
                        cpu_cache_mb: int = 0, pin_stages: list[str] | None = None,
                        q4_dir: str | Path | None = None,
                        expert_paging: bool = False, expert_cache_mb: int = 0,
-                       use_mxfp4: bool = False) -> "PagedCausalLM":
+                       use_mxfp4: bool = False,
+                       kimi_text_only: bool = False,
+                       trust_local_code: bool = False) -> "PagedCausalLM":
+        # Code from a model directory is executable Python, not trusted data.
+        # Kimi must be an explicit opt-in: never enable it merely based on config.
+        if kimi_text_only and not trust_local_code:
+            raise PagingError("Kimi text-only requires explicit trust_local_code=True")
+        if trust_local_code and not kimi_text_only:
+            raise PagingError("trust_local_code is only supported with kimi_text_only")
+        if kimi_text_only and q4_dir is not None:
+            raise PagingError("Kimi text-only currently requires original native MXFP4 safetensors")
         try:
             import torch
             from accelerate import init_empty_weights
@@ -33,6 +43,14 @@ class PagedCausalLM:
         if q4_dir is not None and use_mxfp4:
             raise PagingError("--q4-dir and --native-mxfp4 are mutually exclusive")
         path = Path(directory).expanduser().resolve(strict=True)
+        if kimi_text_only:
+            from .kimi import require_local_kimi_code, inspect_kimi_config
+            # Reject unknown architecture, missing files and unexpected auto_map
+            # before executing model-supplied Python. This is not a code audit.
+            inspect_kimi_config(path)
+            require_local_kimi_code(path)
+            use_mxfp4 = True  # K3's routed experts are natively MXFP4.
+            expert_paging = True  # Never materialize all 896 experts at once.
         if q4_dir is None:
             index = SafetensorsIndex(path)
         else:
@@ -41,12 +59,32 @@ class PagedCausalLM:
         if use_mxfp4:
             from .mxfp4 import MXFP4Index
             index = MXFP4Index(index)
-        # Local-only: prohibit downloading weights, tokenizers and remote Python code.
-        config = AutoConfig.from_pretrained(path, local_files_only=True, trust_remote_code=False)
-        with init_empty_weights(include_buffers=False):
-            model = AutoModelForCausalLM.from_config(config, trust_remote_code=False, attn_implementation="eager")
+        if kimi_text_only:
+            from .kimi import TextWeightView
+            index = TextWeightView(index)
+            # The official K3 multimodal wrapper contains a 401M vision tower.
+            # Instantiate ONLY its text model and map the original checkpoint
+            # keys into it. No full checkpoint is loaded by Transformers.
+            config = AutoConfig.from_pretrained(
+                path, local_files_only=True, trust_remote_code=True)
+            # K3's nested text_config has _name_or_path=""; AutoModel's
+            # dynamic class lookup could resolve that empty path incorrectly.
+            # Import only the exact reviewed class from this local directory.
+            from transformers.dynamic_module_utils import get_class_from_dynamic_module
+            model_cls = get_class_from_dynamic_module(
+                "modeling_kimi_linear.KimiLinearForCausalLM",
+                str(path), local_files_only=True)
+            with init_empty_weights(include_buffers=False):
+                model = model_cls(config.text_config)
+        else:
+            # All other architectures: NEVER run model repository Python.
+            config = AutoConfig.from_pretrained(path, local_files_only=True, trust_remote_code=False)
+            with init_empty_weights(include_buffers=False):
+                model = AutoModelForCausalLM.from_config(
+                    config, trust_remote_code=False, attn_implementation="eager")
         model.eval()
-        tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
+        tokenizer = AutoTokenizer.from_pretrained(
+            path, local_files_only=True, trust_remote_code=kimi_text_only)
         pager = LayerPager(model, index, device=device, sync_timing=sync_timing,
                            prefetch=prefetch, cpu_cache_mb=cpu_cache_mb,
                            pin_stages=pin_stages, expert_paging=expert_paging,
@@ -89,6 +127,10 @@ def main() -> None:
                         help="pin up to this many MiB of selected checkpoint tensors in CPU RAM; 0 disables")
     parser.add_argument("--pin-stage", action="append", default=None,
                         help="cache only this stage (repeatable); e.g. lm_head, model.embed_tokens")
+    parser.add_argument("--kimi-text-only", action="store_true",
+                        help="experimental Kimi K3 text-only adapter (native MXFP4 + sparse experts)")
+    parser.add_argument("--trust-local-code", action="store_true",
+                        help="explicitly execute LOCAL Kimi model Python; review files first")
     parser.add_argument("--native-mxfp4", action="store_true",
                         help="unpack native MXFP4 weight_packed/weight_scale pairs (reference CPU/CUDA decoder)")
     parser.add_argument("--expert-paging", action="store_true",
@@ -106,6 +148,12 @@ def main() -> None:
                 "pin_stages": args.pin_stage}
     if args.native_mxfp4 and args.q4_dir is not None:
         parser.error("--native-mxfp4 and --q4-dir cannot be combined")
+    if args.kimi_text_only != args.trust_local_code:
+        parser.error("--kimi-text-only requires --trust-local-code (and vice versa)")
+    if args.kimi_text_only and args.auto_tune:
+        parser.error("--auto-tune is not supported with --kimi-text-only")
+    if args.kimi_text_only and args.q4_dir is not None:
+        parser.error("Kimi text-only requires original native MXFP4 weights")
     if args.auto_tune and args.native_mxfp4:
         parser.error("--auto-tune with --native-mxfp4 is not yet supported")
     if args.auto_tune and args.expert_paging:
@@ -124,7 +172,9 @@ def main() -> None:
     engine = PagedCausalLM.from_local_dir(
         args.model_dir, device=args.device, sync_timing=args.profile,
         q4_dir=args.q4_dir, expert_paging=args.expert_paging,
-        expert_cache_mb=args.expert_cache_mb, use_mxfp4=args.native_mxfp4, **selected,
+        expert_cache_mb=args.expert_cache_mb, use_mxfp4=args.native_mxfp4,
+        kimi_text_only=args.kimi_text_only,
+        trust_local_code=args.trust_local_code, **selected,
     )
     try:
         print(engine.generate(args.prompt, max_new_tokens=args.tokens))

@@ -29,4 +29,5 @@ jobs:
           python -m unittest discover -s tests -p test_q4.py -v
           python -m unittest discover -s tests -p test_moe.py -v
           python -m unittest discover -s tests -p test_mxfp4.py -v
+          python -m unittest discover -s tests -p test_kimi.py -v
           python -m unittest discover -s tests -p test_stream_integration.py -v

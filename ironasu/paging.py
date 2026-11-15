@@ -236,6 +236,20 @@ class LayerPager:
         self._resident: set[str] = set()
         self._stages: list[_Stage] = []
         stage_names = decoder_stage_names(model)
+        # Official Kimi Linear calls its output depth-attention weights through
+        # F.linear / functional normalization, not nn.Module.__call__. Thus
+        # hooking output_attn_res_proj directly would never load the weights.
+        # Keep only these small weights resident for the duration of model.forward.
+        # This is an overlapping *envelope*, not a full-weight model stage.
+        residual_prefix = "model.output_attn_res_"
+        has_output_residual = any(
+            name.startswith(residual_prefix) for name, _ in model.named_parameters()
+        )
+        if has_output_residual:
+            if not (_lookup(model, "model").__class__.__name__.startswith("Kimi") or
+                    getattr(_lookup(model, "model"), "use_attn_residuals", False)):
+                raise PagingError("Unexpected functional output attention residual weights")
+            stage_names.insert(0, "model")
         try:
             expert_modules = discover_experts(model, stage_names) if expert_paging else {}
         except ValueError as exc:
@@ -258,6 +272,10 @@ class LayerPager:
             slots: list[_Slot] = []
             for local, parameter in module.named_parameters(remove_duplicate=False):
                 qualified = f"{path}.{local}"
+                if path == "model" and not qualified.startswith(residual_prefix):
+                    # Strictly avoid materializing decoder blocks or embeddings
+                    # when the outer model envelope hook runs.
+                    continue
                 if expert_prefixes and qualified.startswith(expert_prefixes):
                     continue
                 source_key = qualified if qualified in names else next(
@@ -281,6 +299,8 @@ class LayerPager:
                 seen.add(qualified)
             for local, tensor in module.named_buffers(recurse=True):
                 qualified = f"{path}.{local}"
+                if path == "model" and not qualified.startswith(residual_prefix):
+                    continue
                 if expert_prefixes and qualified.startswith(expert_prefixes):
                     continue
                 if qualified not in names:
