@@ -201,7 +201,7 @@
   async function refreshStatus() {
     try {
       const data = await fetchJson("/ui/status");
-      setConnection(Boolean(data.upstream_available), data.upstream_available ? "接続済み" : "モデル未接続");
+      setConnection(Boolean(data.upstream_available), data.upstream_available ? "モデル一覧取得済み" : "モデル一覧取得不可");
       byId("fast-model").textContent = data.fast_model || "—";
       byId("quality-model").textContent = data.quality_model || "—";
       const m = data.metrics || {};
