@@ -285,6 +285,26 @@ correctness and cache hits. Optional CI integration generates tiny GPT-2 and
 Qwen2 models locally and verifies greedy multi-token parity, but full-size Qwen,
 70B, MoE, FP8, CUDA and the target ASUS remain unverified.
 
+
+## v0.6 — 重みIDハッシュテーブル（既存キャッシュの重複排除）
+
+`ironasu` の固定CPUキャッシュを、ステージ名でなく **safetensorsのテンソル名** をキーとする辞書（ハッシュテーブル）に変更しました。
+モデル全体をハッシュ計算するのではなく、検証済みのチェックポイント内でテンソル名を同一性の根拠として扱います。Pythonの辞書がキーの等価性も確認するため、通常のハッシュ衝突による誤共有は起こしません。
+
+- 重み共有（tied embedding / output head）がある場合、同じテンソルをCPU RAMに二重保持しません。
+- どのレイヤーからでもキャッシュ済みテンソルを参照でき、ディスク読み込みが不要になります。
+- キャッシュの容量予算は**ユニークなテンソル**に対して計算します。`--cpu-cache-mb` は従来どおり有効です。
+- `pager.snapshot()["cpu_cache"]` に `granularity`, `cached_tensors`, `tensor_hits`, `tensor_misses`, `deduplicated_planned_bytes`, `avoided_read_bytes` が追加されました。
+
+```bash
+ironasu-stream ./models/my-model --device cpu --tokens 8 --cpu-cache-mb 512 \
+  --prompt "Write Python unit tests"
+```
+
+**再現可能な小型テスト**：入力Embeddingと出力ヘッドが同じテンソルを指すToyDecoderで、3回のforwardについて、そのテンソルのcheckpoint読み込みがキャッシュなしの6回から1回に減り、出力はビット単位で一致しました。これは重み共有テンソルに関する**読み込み回数の比較**であり、実際のSSD I/O量・時間・FLOPsの削減率ではありません。重み共有が少ないモデルでは効果は限定的です。
+
+**適用限界**：ハッシュテーブル自体で70Bの計算量が減るわけではありません。モデルの大規模化は層単位のSSDストリーミングが実現し、ハッシュテーブルは重複するRAM使用量と一部I/Oを削減します。KVキャッシュは別のしくみであり、任意のプロンプトをハッシュキーだけで安全に再利用できるわけではありません。キャッシュは現在プロセス内・モデルインスタンス内に限定されています。実機の推論速度はベンチマークで評価してください。
+
 ## v0.5: **IroNasu Compass — 測る・選ぶ・守る・戻す**
 
 ironasuはAirLLMの単なる模倣ではありません。「大きいモデルを動かす」だけでなく、

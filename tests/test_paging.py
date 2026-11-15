@@ -19,13 +19,13 @@ from ironasu.paging import LayerPager, PagingError, SafetensorsIndex, decoder_st
 
 if torch is not None:
     class ToyDecoder(nn.Module):
-        def __init__(self, tied=False):
+        def __init__(self, tied=False, vocab=17, width=8):
             super().__init__()
             self.model = nn.Module()
-            self.model.embed_tokens = nn.Embedding(17, 8)
-            self.model.layers = nn.ModuleList([nn.Linear(8, 8), nn.Linear(8, 8)])
-            self.model.norm = nn.LayerNorm(8)
-            self.lm_head = nn.Linear(8, 17, bias=False)
+            self.model.embed_tokens = nn.Embedding(vocab, width)
+            self.model.layers = nn.ModuleList([nn.Linear(width, width), nn.Linear(width, width)])
+            self.model.norm = nn.LayerNorm(width)
+            self.lm_head = nn.Linear(width, vocab, bias=False)
             if tied:
                 self.lm_head.weight = self.model.embed_tokens.weight
 
@@ -151,6 +151,76 @@ class StreamingTests(unittest.TestCase):
                 with pager.session() as model:
                     torch.testing.assert_close(model(self.ids), self.source(self.ids), rtol=0, atol=0)
             self.assertEqual(pager.snapshot()["cpu_cache"]["hits"], 5)
+
+    def test_hash_table_reuses_tied_tensors_across_unpinned_stages(self):
+        # Only lm_head is explicitly pinned. The input embedding uses the same
+        # checkpoint tensor, and must profit from the hash table on later runs.
+        source = ToyDecoder(tied=True).eval()
+        save_file({k: v.detach().contiguous() for k, v in source.state_dict().items()
+                   if k != "lm_head.weight"}, self.path / "shared.safetensors")
+        (self.path / "model.safetensors").unlink()
+        (self.path / "shared.safetensors").rename(self.path / "model.safetensors")
+        with torch.device("meta"):
+            meta = ToyDecoder(tied=True)
+        index = SafetensorsIndex(self.path)
+        read_calls = []
+        original_read = index.read
+
+        def counting_read(names):
+            read_calls.append(list(names))
+            return original_read(names)
+        index.read = counting_read
+        with LayerPager(meta, index, cpu_cache_mb=1,
+                        pin_stages=["lm_head"]) as pager:
+            for _ in range(3):
+                with pager.session() as model:
+                    torch.testing.assert_close(model(self.ids), source(self.ids), rtol=0, atol=0)
+            snapshot = pager.snapshot()["cpu_cache"]
+            self.assertEqual(snapshot["granularity"], "tensor_hash_table")
+            self.assertEqual(snapshot["cached_tensors"], 1)
+            self.assertEqual(snapshot["hits"], 5)  # head on first run, then both aliases
+            self.assertEqual(snapshot["tensor_hits"], 5)
+            self.assertIn("model.embed_tokens", snapshot["cached_stages"])
+            self.assertIn("lm_head", snapshot["cached_stages"])
+            self.assertLessEqual(snapshot["occupied_bytes"], snapshot["budget_bytes"])
+            self.assertEqual(sum("model.embed_tokens.weight" in keys for keys in read_calls), 1)
+            self.assertEqual(snapshot["avoided_read_bytes"], 5 * 17 * 8 * 4)
+        # Independent baseline: without a hash cache, the physical tensor must
+        # be fetched twice per forward, once per alias (6 reads across 3 runs).
+        baseline_index = SafetensorsIndex(self.path)
+        baseline_calls = []
+        original_baseline_read = baseline_index.read
+        def count_baseline(names):
+            baseline_calls.append(list(names))
+            return original_baseline_read(names)
+        baseline_index.read = count_baseline
+        with torch.device("meta"):
+            baseline_meta = ToyDecoder(tied=True)
+        with LayerPager(baseline_meta, baseline_index, cpu_cache_mb=0) as baseline_pager:
+            for _ in range(3):
+                with baseline_pager.session() as model:
+                    torch.testing.assert_close(model(self.ids), source(self.ids), rtol=0, atol=0)
+        self.assertEqual(sum("model.embed_tokens.weight" in keys for keys in baseline_calls), 6)
+
+    def test_hash_table_admits_tied_weight_once_with_limited_ram(self):
+        # Each alias consumes ~768KiB, so stage-wise caching cannot fit both
+        # copies in 1MiB, whereas tensor-keyed caching fits the unique tensor.
+        source = ToyDecoder(tied=True, vocab=12000, width=16).eval()
+        save_file({k: v.detach().contiguous() for k, v in source.state_dict().items()
+                   if k != "lm_head.weight"}, self.path / "shared.safetensors")
+        (self.path / "model.safetensors").unlink()
+        (self.path / "shared.safetensors").rename(self.path / "model.safetensors")
+        with torch.device("meta"):
+            meta = ToyDecoder(tied=True, vocab=12000, width=16)
+        with LayerPager(meta, SafetensorsIndex(self.path), cpu_cache_mb=1) as pager:
+            with pager.session() as model:
+                torch.testing.assert_close(model(self.ids), source(self.ids), rtol=0, atol=0)
+            snap = pager.snapshot()["cpu_cache"]
+            self.assertIn("lm_head", snap["planned_stages"])
+            self.assertIn("model.embed_tokens", snap["planned_stages"])
+            self.assertLess(snap["occupied_bytes"], 1024 * 1024)
+            self.assertLess(snap["cached_tensors"], len(pager.index.keys()) + 1)
+            self.assertGreaterEqual(snap["deduplicated_planned_bytes"], 12000 * 16 * 4)
 
     def test_invalid_cache_settings_are_rejected(self):
         for budget in (-1, 1.1, True):

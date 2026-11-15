@@ -189,13 +189,21 @@ class LayerPager:
         self._cpu_cache_budget = cpu_cache_mb * (1024 ** 2)
         self._cpu_cache_bytes = 0
         self._cpu_cache_lock = Lock()
-        self._cpu_cache: dict[str, dict[str, Any]] = {}
+        # Tensor identity is a checkpoint-local key, not a hash of its bytes.
+        # Python dict is already a collision-safe hash table (key equality is
+        # checked): no expensive weight hashing or unsafe fingerprint reuse.
+        # Cross-stage aliases, such as tied embeddings / lm_head, occupy RAM once.
+        self._cpu_cache: dict[str, Any] = {}
+        self._selected_tensor_names: set[str] = set()
+        self._cache_tensor_bytes: dict[str, int] = {}
         self._cpu_cache_hit_count = 0
         self._cpu_cache_miss_count = 0
+        self._tensor_cache_hits = 0
+        self._tensor_cache_misses = 0
         self._disk_read_bytes = 0
         self._avoided_read_bytes = 0
         self._pin_stage_names: set[str] = set()
-        self._pin_stage_budget: dict[str, int] = {}
+        self._deduplicated_planned_bytes = 0
         self._executor: ThreadPoolExecutor | None = None
         self._ahead: tuple[str, Future] | None = None
         self._run_started: dict[str, float] = {}
@@ -273,8 +281,8 @@ class LayerPager:
                 candidates = [stage_by_name[name] for name in pin_stages]
             else:
                 # Prioritize output head and embedding, then sequential blocks.
-                # Stage sizes are derived from tensor headers; tied weights in
-                # different stages are budgeted independently, conservatively.
+                # Derive tensor sizes from headers and budget *unique* tensors.
+                # Tied embedding/output head weights are admitted only once.
                 priority = {"lm_head": 0, "embed_out": 0,
                             "model.embed_tokens": 1, "transformer.wte": 1,
                             "gpt_neox.embed_in": 1}
@@ -289,12 +297,25 @@ class LayerPager:
             for stage in candidates:
                 if not stage.slots:
                     continue
-                keys = list(dict.fromkeys(slot.checkpoint_name for slot in stage.slots))
-                estimated = sum(checkpoint_sizes[key] for key in keys)
+                keys = set(slot.checkpoint_name for slot in stage.slots)
+                additional = keys - self._selected_tensor_names
+                estimated = sum(checkpoint_sizes[key] for key in additional)
                 if estimated <= remaining:
                     self._pin_stage_names.add(stage.name)
-                    self._pin_stage_budget[stage.name] = estimated
+                    self._selected_tensor_names.update(keys)
                     remaining -= estimated
+            self._cache_tensor_bytes = {
+                name: checkpoint_sizes[name] for name in self._selected_tensor_names
+            }
+            # How much RAM stage-keyed caching would have reserved for aliases.
+            planned_bytes_without_dedup = sum(
+                checkpoint_sizes[slot.checkpoint_name]
+                for stage in candidates if stage.name in self._pin_stage_names
+                for slot in stage.slots
+            )
+            self._deduplicated_planned_bytes = (
+                planned_bytes_without_dedup - sum(self._cache_tensor_bytes.values())
+            )
         # Model-level nonpersistent buffers (rotary cache, attention masks) can be
         # needed outside streamed modules. Keep these small buffers resident.
         # GPU inference must not mix a CUDA activation with a CPU attention mask.
@@ -318,34 +339,48 @@ class LayerPager:
             torch.cuda.synchronize(self.device)
 
     def _load_stage_cpu(self, stage: _Stage):
-        # The worker thread may be reading the next stage while the main thread
-        # performs model.forward. Protect statistics and dictionary mutation.
-        keys = list(dict.fromkeys(x.checkpoint_name for x in stage.slots))
+        """Reassemble a stage from a bounded, tensor-keyed hash table.
+
+        A tensor shared by multiple stages is loaded and stored only once, and
+        can be reused even if its other stage was not admitted to the cache.
+        Only *missing* tensors are fetched; no tensor-data hashing takes place.
+        """
+        keys = list(dict.fromkeys(slot.checkpoint_name for slot in stage.slots))
         with self._cpu_cache_lock:
-            cached = self._cpu_cache.get(stage.name)
-            if cached is not None:
+            cached = {key: self._cpu_cache[key] for key in keys if key in self._cpu_cache}
+            missing = [key for key in keys if key not in cached]
+            self._tensor_cache_hits += len(cached)
+            self._tensor_cache_misses += len(missing)
+            saved_bytes = sum(self._cache_tensor_bytes[key] for key in cached)
+            self._avoided_read_bytes += saved_bytes
+            if missing:
+                self._cpu_cache_miss_count += 1
+                self._traces[stage.name]["cache_misses"] += 1
+            else:
                 self._cpu_cache_hit_count += 1
                 self._traces[stage.name]["cache_hits"] += 1
-                self._avoided_read_bytes += self._pin_stage_budget[stage.name]
-                return cached, 0.0
-            self._cpu_cache_miss_count += 1
-            self._traces[stage.name]["cache_misses"] += 1
+        if not missing:
+            return cached, 0.0
         started = perf_counter()
-        data = self.index.read(keys)
+        new_data = self.index.read(missing)
         elapsed = perf_counter() - started
-        size_bytes = sum(t.numel() * t.element_size() for t in data.values())
-        # Conservative upper bound of what this stage has read from safetensors.
+        size_bytes = sum(t.numel() * t.element_size() for t in new_data.values())
+        tensors = {**cached, **new_data}
+        # Verify all aliases before exposing any newly read tensor to the cache.
+        if any(tuple(tensors[slot.checkpoint_name].shape) != slot.shape
+               for slot in stage.slots):
+            raise PagingError(f"Tensor shape mismatch in stage {stage.name}")
         with self._cpu_cache_lock:
             self._disk_read_bytes += size_bytes
             self._traces[stage.name]["disk_read_bytes"] += size_bytes
-            if (stage.name in self._pin_stage_names and
-                    self._cpu_cache_bytes + size_bytes <= self._cpu_cache_budget):
-                # Do NOT cache a corrupt/incompatible checkpoint tensor.
-                expected = {slot.checkpoint_name: slot.shape for slot in stage.slots}
-                if all(tuple(data[key].shape) == shape for key, shape in expected.items()):
-                    self._cpu_cache[stage.name] = data
-                    self._cpu_cache_bytes += size_bytes
-        return data, elapsed
+            for key, tensor in new_data.items():
+                if key not in self._selected_tensor_names or key in self._cpu_cache:
+                    continue
+                actual_bytes = tensor.numel() * tensor.element_size()
+                if self._cpu_cache_bytes + actual_bytes <= self._cpu_cache_budget:
+                    self._cpu_cache[key] = tensor
+                    self._cpu_cache_bytes += actual_bytes
+        return tensors, elapsed
 
     def _make_pre(self, stage: _Stage):
         def hook(module: Any, arguments: Any) -> None:
@@ -450,12 +485,20 @@ class LayerPager:
             "resident_stage_count": len(self._resident),
             "cpu_cache": {
                 "policy": "fixed_admission",
+                "granularity": "tensor_hash_table",
                 "budget_bytes": self._cpu_cache_budget,
                 "occupied_bytes": self._cpu_cache_bytes,
                 "planned_stages": sorted(self._pin_stage_names),
-                "cached_stages": sorted(self._cpu_cache),
+                "cached_stages": sorted(stage.name for stage in self._stages if
+                                        stage.slots and all(slot.checkpoint_name in self._cpu_cache
+                                                            for slot in stage.slots)),
+                "cached_tensors": len(self._cpu_cache),
+                "unique_planned_tensors": len(self._selected_tensor_names),
+                "deduplicated_planned_bytes": self._deduplicated_planned_bytes,
                 "hits": self._cpu_cache_hit_count,
                 "misses": self._cpu_cache_miss_count,
+                "tensor_hits": self._tensor_cache_hits,
+                "tensor_misses": self._tensor_cache_misses,
                 "disk_read_bytes": self._disk_read_bytes,
                 "avoided_read_bytes": self._avoided_read_bytes,
             },
