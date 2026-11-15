@@ -232,7 +232,7 @@ class DesktopWindow:
         self._build_agents()
 
     def _build_chat(self) -> None:
-        tk = self.tk
+        tk, ttk = self.tk, self.ttk
         page = self.chat_tab
         page.grid_rowconfigure(1, weight=1)
         page.grid_columnconfigure(0, weight=1)
