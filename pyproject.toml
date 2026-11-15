@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ironasu"
+version = "1.0.0"
+description = "Adaptive LLM gateway, out-of-core inference, coding harness and experimental speculation scheduling"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+[project.optional-dependencies]
+stream = ["torch>=2.4", "safetensors>=0.4", "transformers>=4.49,<5", "accelerate>=1.0"]
+
+[tool.setuptools.packages.find]
+include = ["ironasu*"]
+
+[project.scripts]
+ironasu = "ironasu.server:serve"
+ironasu-harness = "ironasu.harness:main"
+ironasu-state-benchmark = "ironasu.speculative_state:main"
+ironasu-context = "ironasu.context_cli:main"
+ironasu-diagnose = "ironasu.diagnostics:main"
+ironasu-benchmark-airllm = "ironasu.airllm_benchmark:main"
+
+ironasu-stream = "ironasu.stream:main"
+ironasu-inspect = "ironasu.checkpoint:main"
+ironasu-tune = "ironasu.tuner:main"
+
+ironasu-quantize-q4 = "ironasu.q4:main"
+ironasu-benchmark-q4 = "ironasu.q4_benchmark:main"
+
+ironasu-moe-plan = "ironasu.moe:main"
+ironasu-kimi-inspect = "ironasu.kimi:main"
