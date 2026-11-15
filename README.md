@@ -115,14 +115,14 @@ curl http://127.0.0.1:8765/v1/chat/completions \
 curl http://127.0.0.1:8765/metrics
 ```
 
-Connect Continue/VS Code to `http://127.0.0.1:8765/v1` with model name `ironasu`. **Streaming is not supported yet**; configure non-streaming requests.
+Connect Continue/VS Code to `http://127.0.0.1:8765/v1` with model name `ironasu`. SSE streaming is supported when the configured upstream backend supports OpenAI-style `text/event-stream` responses; otherwise use non-streaming requests.
 
 ## Request controls
 
 - `x_ironasu_mode`: `auto` (default), `fast`, `quality`.
 - `x_ironasu_cache`: `true` (default) or `false`. Caching applies only when `temperature=0` and there are no tools/tool_choice. Time-sensitive requests should set `false`.
 - Response `_ironasu.route`: `fast` or `quality`; `_ironasu.source`: `upstream`, `cache`, or `singleflight`.
-- `stream=true` currently returns HTTP 400 instead of silently pretending streaming works.
+- `stream=true` passes through backend SSE with existing admission limits. It bypasses exact caching and cannot be combined with `x_ironasu_files`; unsupported backends fail explicitly instead of pretending streaming works.
 
 ## Configuration
 
@@ -160,7 +160,7 @@ The first easy win is skipping entire duplicate calls (exactly one avoided invoc
 - CPU↔GPU layer prefetch and bounded asynchronous I/O with hardware measurements.
 - Compatible backend speculative decoding (e.g. llama.cpp draft or n-gram), accepting that it may improve latency without reducing total FLOPs.
 - Architecture-aware, calibrated approximate layer/expert skipping, only behind an explicit opt-in and tested quality constraints.
-- Streaming SSE and comprehensive tool-call behavior before production VS Code integration.
+- Comprehensive streaming tool-call semantics and production VS Code integration testing (basic SSE passthrough now exists).
 
 License: MIT (add license text when distributing publicly).
 
