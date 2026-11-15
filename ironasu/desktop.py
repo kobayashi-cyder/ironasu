@@ -18,7 +18,7 @@ import time
 from typing import Any, Callable
 
 from .compat import AutoHTTPBackend, PRESETS
-from .corpus_agents import CorpusAgentTeam, MAX_CORPUS_CHARS
+from .corpus_agents import CorpusAgentTeam, MAX_CORPUS_CHARS, split_corpus, split_segments
 from .core import AdaptiveEngine, Config, HTTPBackend, InferenceError
 from .desktop_logic import GenerationStats, SSEEvents, extract_reasoning, extract_text, normalized_model_selection
 from .models import ModelManager
@@ -101,6 +101,7 @@ class DesktopWindow:
         self.corpus_file_text: str | None = None
         self.corpus_file_path = ""
         self.agent_report = None
+        self.agent_total_segments = 0
         self.last_model_id = None
         self.available_models: list[str] = []
         self.native_files: list[dict[str, Any]] = []
@@ -590,6 +591,8 @@ class DesktopWindow:
             effective_slots = min(slots, self.config.max_concurrency)
             if not 1 <= effective_slots <= 16:
                 raise ValueError("モデル呼び出し制限が不正です。")
+            self.agent_total_segments = sum(len(split_segments(part))
+                                            for part in split_corpus(corpus, partitions))
         except (ValueError, self.tk.TclError) as exc:
             self._show_error(exc)
             return
@@ -762,8 +765,9 @@ class DesktopWindow:
                 self.agent_state.config(
                     text=f"分析中: エージェント {agent + 1}/{parts} "
                          f"パート内 {local_done}/{local_total} セグメント完了")
-                self.agent_progress.config(
-                    value=min(98, self.agent_progress["value"] + 1))
+                if self.agent_total_segments > 0:
+                    self.agent_progress.config(
+                        value=min(99, int(100 * completed / self.agent_total_segments)))
             elif kind == "status":
                 self.composer_note.config(text=item[1])
         self.root.after(80, self._drain)
