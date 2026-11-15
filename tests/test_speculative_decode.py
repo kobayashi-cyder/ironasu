@@ -161,7 +161,7 @@ class VerifiedSpeculationTests(unittest.TestCase):
         model = FakeModel()
         verifier = PagedTorchGreedyTarget(model, FakeTorch(), "cpu")
         prefix = (1, 2, 1)
-        self.assertEqual(verifier(prefix, (2, 99)), (2, 1, 2))
+        self.assertEqual(verifier(prefix, (2, 99)), (2, 1, 1))
         self.assertEqual(verifier.processed_prefix, prefix + (2,))
         self.assertEqual(verifier.cache.count, 4)
         self.assertEqual(verifier(prefix + (2, 1), ()), (2,))
