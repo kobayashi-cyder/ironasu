@@ -1,5 +1,18 @@
 # ironasu
 
+## v1.6 — independent desktop GUI + 16 corpus agents
+
+**ironasu Studio now opens its own native window rather than a browser.**
+The Windows ironasu-studio.exe uses built-in Tk controls and starts without
+Chrome, Edge, WebView2, an HTTP UI server, or a separate Python installation.
+The browser interface remains available via ironasu-studio-web.
+
+The desktop includes an エージェント ×16 tab: 4/16 lossless ordered corpus
+partitions, up to 16 read-only analysis workers, separately bounded model
+requests (two by default) and a final synthesis with JSON export.
+See [native desktop and corpus agents](docs/desktop.md).
+
+
 ## ironasu Studio (offline Web UI)
 
 **New in v1.5:** TTFT/tok/s/Reasoning diagnostics, separate model-provided
