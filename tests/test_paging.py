@@ -164,6 +164,24 @@ class StreamingTests(unittest.TestCase):
             LayerPager(self.meta, self.index, cpu_cache_mb=1,
                        pin_stages=["lm_head", "lm_head"])
 
+    def test_checkpoint_inventory_reports_payload_and_cache_plan(self):
+        from ironasu.checkpoint import inspect_checkpoint
+        report = inspect_checkpoint(self.path, cpu_cache_mb=1)
+        self.assertEqual(report["shards"], 1)
+        self.assertEqual(report["tensor_count"], len(self.index.keys()))
+        self.assertEqual(report["unrecognized_tensor_bytes"], 0)
+        self.assertEqual(report["tensor_payload_bytes"],
+                         sum(self.index.tensor_byte_sizes(sorted(self.index.keys())).values()))
+        self.assertIn("model.layers.0", report["stages_bytes"])
+        self.assertIn("lm_head", report["cpu_cache_plan"]["estimated_pinned_stages"])
+        self.assertLessEqual(report["cpu_cache_plan"]["estimated_pinned_bytes"], 1024 * 1024)
+
+    def test_checkpoint_inventory_rejects_invalid_budget(self):
+        from ironasu.checkpoint import inspect_checkpoint
+        for bad in (-1, 1.5, True):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                inspect_checkpoint(self.path, cpu_cache_mb=bad)
+
     def test_safetensors_metadata_only_byte_count(self):
         sizes = self.index.tensor_byte_sizes([
             "model.embed_tokens.weight", "model.layers.0.weight",

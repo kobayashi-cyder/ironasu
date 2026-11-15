@@ -284,3 +284,17 @@ is compute/transfer, a speedup may be zero. Synthetic unit tests validate
 correctness and cache hits. Optional CI integration generates tiny GPT-2 and
 Qwen2 models locally and verifies greedy multi-token parity, but full-size Qwen,
 70B, MoE, FP8, CUDA and the target ASUS remain unverified.
+
+
+### Estimate the memory cost before loading a huge model
+
+```bash
+python -m ironasu.checkpoint ./models/qwen2-local --cpu-cache-mb 2048
+# or after installation: ironasu-inspect ./models/qwen2-local --cpu-cache-mb 2048
+```
+
+The inspector reads only safetensors headers, reports checkpoint disk bytes,
+weight payload bytes, per-stage sizes and a *provisional* fixed-cache plan.
+It cannot measure peak process RSS, KV cache, prefetch staging, CUDA memory,
+or actual wall time. Unrecognized checkpoint keys are reported, not silently
+claimed to be supported.

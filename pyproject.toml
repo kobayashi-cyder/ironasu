@@ -22,3 +22,4 @@ ironasu-diagnose = "ironasu.diagnostics:main"
 ironasu-benchmark-airllm = "ironasu.airllm_benchmark:main"
 
 ironasu-stream = "ironasu.stream:main"
+ironasu-inspect = "ironasu.checkpoint:main"
