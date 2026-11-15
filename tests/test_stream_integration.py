@@ -5,7 +5,7 @@ import unittest
 try:
     import torch
     from accelerate import init_empty_weights
-    from transformers import AutoConfig, AutoModelForCausalLM, GPT2Config, Qwen2Config
+    from transformers import AutoConfig, AutoModelForCausalLM, BatchEncoding, GPT2Config, Qwen2Config
     HAVE_DEPS = True
 except ImportError:
     HAVE_DEPS = False
@@ -13,6 +13,7 @@ except ImportError:
 from ironasu.paging import LayerPager, SafetensorsIndex
 from ironasu.q4 import Q4Index, quantize_checkpoint
 from ironasu.speculative_decode import PagedTorchGreedyTarget, verify_greedy
+from ironasu.stream import PagedCausalLM
 
 
 @unittest.skipUnless(HAVE_DEPS, "optional transformers/accelerate dependencies are not installed")
@@ -97,6 +98,26 @@ class RealTransformersTests(unittest.TestCase):
                         # prefix; otherwise safely replay all context tokens.
                         follow_up = verifier(context + accepted.emitted, ())
                         self.assertEqual(len(follow_up), 1)
+                # Exercise the public PagedCausalLM.generate opt-in path,
+                # not just the standalone target callback.
+                class FixedTokenizer:
+                    eos_token_id = None
+
+                    def __call__(self, prompt, return_tensors):
+                        assert prompt == "fixed input"
+                        return BatchEncoding({
+                            "input_ids": ids.clone(),
+                            "attention_mask": torch.ones_like(ids)
+                        })
+
+                    def decode(self, token_ids, skip_special_tokens):
+                        return ",".join(str(int(t)) for t in token_ids)
+
+                generated = PagedCausalLM(empty, FixedTokenizer(), pager).generate(
+                    "fixed input", max_new_tokens=2, speculative_ngram=True)
+                expected = ",".join(str(int(t)) for t in
+                                    normal_tokens[0, ids.shape[1]:ids.shape[1] + 2])
+                self.assertEqual(generated, expected)
                 self.assertGreater(pager.snapshot()["cpu_cache"]["hits"], 0)
                 self.assertTrue(all(p.device.type == "meta" for p in empty.parameters()))
 
