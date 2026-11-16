@@ -48,6 +48,7 @@ class TestIsolatedMissions(unittest.TestCase):
         subprocess.run(["git", "init", "-q", str(self.root)], check=True)
         git(self.root, "config", "user.email", "test@example.invalid")
         git(self.root, "config", "user.name", "Test Agent")
+        git(self.root, "config", "core.autocrlf", "false")
         (self.root / ".gitignore").write_text(".ironasu/\n__pycache__/\n", encoding="utf-8")
         (self.root / "README.md").write_text("baseline\n", encoding="utf-8")
         git(self.root, "add", ".gitignore", "README.md")
