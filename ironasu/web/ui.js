@@ -227,6 +227,12 @@
       byId("stat-waiting").textContent = String(m.waiting_requests ?? "—");
       byId("stat-cache").textContent = String(m.cache_hits ?? "—");
       byId("stat-calls").textContent = String(sumCalls);
+      const evidence = m.efficiency || {};
+      const observed = evidence.observed || {};
+      const rate = (evidence.derived || {}).response_reuse_fraction;
+      byId("stat-avoided").textContent = String(observed.avoided_upstream_requests ?? "—");
+      byId("stat-reuse-rate").textContent =
+        typeof rate === "number" && Number.isFinite(rate) ? (rate * 100).toFixed(1) + "%" : "—";
       byId("pressure-status").textContent = m.pressure ? "高負荷" : "通常";
       const modelList = byId("backend-models");
       modelList.replaceChildren();
@@ -262,7 +268,8 @@
     const payload = {
       messages, model: "ironasu", temperature: Number(ui.temp.value),
       top_p: Number(ui.topP.value), max_tokens: Number(ui.maxTokens.value),
-      stream: ui.stream.checked, x_ironasu_cache: true
+      stream: ui.stream.checked, x_ironasu_cache: true,
+      x_ironasu_budget: { preserve_auto_quality: true }
     };
     if (byId("autoload-toggle").checked && ui.model.value.startsWith("direct:")
         && !ui.model.value.slice(7).startsWith("ironasu-local-")) {
