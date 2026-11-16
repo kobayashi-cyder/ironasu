@@ -331,6 +331,8 @@ class MissionController:
             raise ValueError("Unsupported verification check")
         if len(paths) > 16 or any(not isinstance(p, str) or not p or len(p) > 256
                                  or Path(p).is_absolute() or ".." in Path(p).parts
+                                 or any(part in (".git", ".ironasu", ".ssh")
+                                        for part in Path(p).parts)
                                  for p in paths):
             raise ValueError("Artifacts must be workspace-relative paths")
         ident = mission_id or uuid4().hex[:16]
