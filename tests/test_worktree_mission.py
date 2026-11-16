@@ -170,8 +170,10 @@ class TestIsolatedMissions(unittest.TestCase):
         git_ops.clean_main()
         left = git_ops.checkout("left", self.baseline)
         right = git_ops.checkout("right", self.baseline)
-        (left / "README.md").write_text("left\n")
-        (right / "README.md").write_text("right\n")
+        # Avoid Windows TextIO newline translation producing CRLF that
+        # Git diff --check would rightly flag as trailing whitespace.
+        (left / "README.md").write_bytes(b"left\n")
+        (right / "README.md").write_bytes(b"right\n")
         lsha = git_ops.commit(left, label="left")
         rsha = git_ops.commit(right, label="right")
         candidate = git_ops.checkout("candidate", self.baseline)
