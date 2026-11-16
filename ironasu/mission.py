@@ -359,7 +359,9 @@ class MissionController:
                 raise ValueError("Mission workspace/model/endpoint mismatch")
             if row["state"] == "verified":
                 return self.report(ident)
-            previous_repair = row["state"] in ("repairing", "repair_uncertain")
+            previous_repair_state = row["state"]
+            previous_repair = previous_repair_state in (
+                "repairing", "repair_uncertain", "repair_paused")
             tasks = parse_plan(json.loads(row["plan"]))
             kinds = tuple(json.loads(row["checks"]))
             paths = tuple(json.loads(row["artifacts"]))
@@ -378,11 +380,12 @@ class MissionController:
                                     tests=allow_tests, steps=max_steps)
                 try:
                     saved = agent.store.load(session)
-                    if record["state"] == "uncertain" and (
-                            saved is None or bool(saved["pending"])):
-                        # A started side effect must be inspected and manually
-                        # resolved in the harness journal before this task resumes.
-                        return "UNCERTAIN: manual tool resolution required"
+                    if record["state"] == "uncertain" and saved is None:
+                        # Never create a new tool session if a previously
+                        # uncertain journal has disappeared.
+                        return "UNCERTAIN: missing prior tool journal"
+                    # The harness decides if pending read-only calls can be
+                    # replayed. Started writes/tests are never replayed.
                     self.journal.set_task(ident, task.task_id, "running")
                     event("task_started", task.task_id)
                     answer = (agent.run(session, None, resume=True) if saved else
@@ -459,11 +462,13 @@ class MissionController:
                 agent = self._agent(gate, writes=True, tests=True, steps=max_steps)
                 try:
                     saved_session = agent.store.load(session)
-                    if previous_pending_repair and (
-                            saved_session is None or bool(saved_session["pending"])):
+                    if (previous_pending_repair and saved_session is None
+                            and previous_repair_state in ("repair_uncertain", "repair_paused")):
                         self.journal.set_state(ident, "repair_uncertain", verdict=verdict)
-                        event("needs_review", "Resolve the previous started repair tool before resuming")
+                        event("needs_review", "Repair session journal missing; do not replay")
                         break
+                    # Existing harness sessions safely resume read-only calls
+                    # but refuse automatic replay of started side effects.
                     task_text = (
                         "A requested acceptance check failed. Diagnose, modify only "
                         "authorized workspace files, and retry permitted checks. "
@@ -477,8 +482,8 @@ class MissionController:
                         event("needs_review", "Repair tool side effect needs manual resolution")
                         break
                     if answer.startswith("PAUSED:"):
-                        self.journal.set_state(ident, "needs_review", verdict=verdict)
-                        event("needs_review", "Repair step budget exhausted")
+                        self.journal.set_state(ident, "repair_paused", verdict=verdict)
+                        event("paused", "Repair step budget reached; resume same session")
                         break
                 except Exception as exc:
                     self.journal.set_state(ident, "needs_review", verdict=verdict)
