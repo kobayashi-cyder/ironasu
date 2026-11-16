@@ -7,7 +7,7 @@ This is an **independent, small implementation** of a local coding harness. It i
 - OpenAI-compatible `/v1/chat/completions` tool-calling models (e.g. a compatible llama.cpp or LocalAI endpoint)
 - Agent-model-tool feedback loop with a bounded step count and basic HTTP retries
 - Persistent SQLite sessions, saved tool results and notes
-- At-most-once **automatic** tool execution across restarts: an operation marked `started` is reported `UNCERTAIN` rather than repeated after a crash
+- Restart safety: interrupted read-only `list_files`, `read_file`, `search_text` and `recall` operations may be replayed automatically. Side-effectful tools (writes, notes, project checks) remain **at-most-once automatically** and are reported `UNCERTAIN` rather than replayed.
 - Read/list/search files, create/edit files (requires `--allow-writes`), and run fixed checks (requires `--allow-tests`)
 - Workspace path confinement, private path exclusions, atomic writes, and optimistic SHA256 precondition on file replacement
 - Context window trimming that preserves intact tool-call/result groups; older context is *omitted*, not accurately summarized
@@ -38,14 +38,16 @@ ironasu-harness --workspace . --session demo --resolve-call CALL_ID \
   --resolve-result "Verified: the file was written and checked" --allow-writes
 ```
 
-The harness does **not** automatically replay started tools; operator resolution is required. This minimizes duplicate side effects, but does not guarantee exactly-once execution across operating-system crashes.
+Started **read-only tools only** (`list_files`, `read_file`, `search_text`, `recall`) are replayed automatically on resume, using the current workspace state. Their tool messages are prefixed with `REPLAYED_READ_ONLY_AFTER_INTERRUPTION` so the agent/operator can distinguish them from the original invocation. Results can differ if files changed during downtime; there is no snapshot isolation.
+
+Started `write_file`, `edit_file`, `remember`, and `run_checks` remain **manual recovery only**. The last tool can execute arbitrary project code, so even apparently read-only tests must not be replayed automatically. This minimizes duplicate side effects, but does not guarantee exactly-once execution across operating-system crashes. An already-completed tool with an inconsistent journal is also not automatically replayed.
 
 ## Missing versus full Grokbot-class system
 
 - No persistent background worker, scheduler, webhooks, wake-on-event or remote durable execution service
 - No desktop/browser control, images, audio, messaging integrations, or native MCP
 - No real execution sandbox, fine-grained interactive approval UI, or credential broker
-- No subagents, team scheduling, task queues, or multi-model cost/rate accounting
+- This standalone harness has no built-in subagents or cross-agent queue; `ironasu-team` exists separately. No multi-model cost/rate accounting
 - No bundled model backend, direct integration with the experimental out-of-core GPU offload, streaming tool protocol, or verified speculative decoding
 
 The integrated repository also contains an adaptive inference HTTP proxy. The harness can use that proxy through `--endpoint http://127.0.0.1:8765/v1`, but its tools and SQLite journal are independent of the proxy. The server does not provide GPU-side speculative token verification.

@@ -91,6 +91,47 @@ class HarnessTests(unittest.TestCase):
         store.resolve_uncertain("three", "uncertain1", "Verified: no file changed")
         self.assertEqual(store.load("three")["pending"], [])
 
+    def test_interrupted_read_only_tool_replays_on_resume(self):
+        target = self.root / "src" / "example.py"
+        target.write_text("before", encoding="utf-8")
+        c = call("interrupted_read", "read_file", {"path": "src/example.py"})
+        store = Store(self.root)
+        store.save("readonly", self.root, "ready",
+                   [{"role": "system", "content": "s"},
+                    {"role": "user", "content": "read"},
+                    {"role": "assistant", "content": None, "tool_calls": [c]}], [c])
+        store.start("readonly", c)
+        # The interrupted operation's actual result was never journaled.
+        # Replaying a READ is safe but observes the CURRENT workspace.
+        target.write_text("after", encoding="utf-8")
+        backend = FakeBackend([{"content": "Finished after recovered read"}])
+        agent = Harness(self.s, backend)
+        self.assertEqual(agent.run("readonly", None, resume=True),
+                         "Finished after recovered read")
+        saved = agent.store.load("readonly")
+        self.assertEqual(saved["status"], "complete")
+        self.assertFalse(saved["pending"])
+        tool_results = [m for m in saved["messages"] if m["role"] == "tool"]
+        self.assertEqual(len(tool_results), 1)
+        self.assertIn("REPLAYED_READ_ONLY_AFTER_INTERRUPTION", tool_results[0]["content"])
+        self.assertIn("after", tool_results[0]["content"])
+        self.assertNotIn("before", tool_results[0]["content"])
+        self.assertEqual(agent.store.event("readonly", "interrupted_read")[0], "done")
+
+    def test_non_read_only_checks_never_replay_on_resume(self):
+        c = call("interrupted_checks", "run_checks", {"kind": "compileall"})
+        store = Store(self.root)
+        store.save("checks", self.root, "ready",
+                   [{"role": "system", "content": "s"},
+                    {"role": "user", "content": "test"},
+                    {"role": "assistant", "content": None, "tool_calls": [c]}], [c])
+        store.start("checks", c)
+        backend = FakeBackend([])
+        agent = Harness(Settings(workspace=self.root, allow_tests=True), backend)
+        self.assertIn("UNCERTAIN", agent.run("checks", None, resume=True))
+        self.assertEqual(agent.store.event("checks", "interrupted_checks")[0], "started")
+        self.assertEqual(backend.calls, [])
+
     def test_notes_are_session_scoped(self):
         store = Store(self.root)
         store.remember("a", "decision", "Use sqlite")
