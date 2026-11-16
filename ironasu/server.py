@@ -176,7 +176,8 @@ def make_handler(engine: AdaptiveEngine, models: ModelManager | None = None,
                 return
             try:
                 request = self._read_json(
-                    cap=8192 if path.startswith(("/ui/models/", "/ui/runtime/")) else MAX_BODY_BYTES
+                    cap=(4 * 1024 * 1024 if path == "/mobile/agents" else
+                         8192 if path.startswith(("/ui/models/", "/ui/runtime/")) else MAX_BODY_BYTES)
                 )
                 if path == "/mobile/agents":
                     self._send(202, {"job": mobile_jobs.start_corpus(request)})

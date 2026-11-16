@@ -4,6 +4,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
@@ -59,8 +60,19 @@ class IronasuClient(endpoint: String, private val token: String) {
                 }
                 val code = conn.responseCode
                 val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-                val bytes = stream?.use { it.readNBytes(4 * 1024 * 1024 + 1) } ?: byteArrayOf()
-                require(bytes.size <= 4 * 1024 * 1024) { "応答が大きすぎます" }
+                val bytes = stream?.use { source ->
+                    val buffer = ByteArray(8192)
+                    val output = ByteArrayOutputStream()
+                    while (true) {
+                        val read = source.read(buffer)
+                        if (read < 0) break
+                        if (output.size() + read > 4 * 1024 * 1024) {
+                            throw IllegalStateException("応答が大きすぎます")
+                        }
+                        output.write(buffer, 0, read)
+                    }
+                    output.toByteArray()
+                } ?: byteArrayOf()
                 val response = try { JSONObject(String(bytes, Charsets.UTF_8)) }
                     catch (_: Exception) { throw IllegalStateException("サーバー応答を解析できません (HTTP $code)") }
                 if (code !in 200..299) {
