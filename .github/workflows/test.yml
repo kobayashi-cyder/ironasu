@@ -24,6 +24,7 @@ jobs:
           ironasu-studio --self-test /tmp/ironasu-desktop-check.json
           python -c "import json; j=json.load(open('/tmp/ironasu-desktop-check.json')); assert j['browser_required'] is False"
           ironasu-team --help
+          ironasu-mission --help
           ironasu-benchmark-ab --help
           ironasu-regression-gate --help
           ironasu-benchmark-load --help
@@ -72,7 +73,8 @@ jobs:
           assert report['native_window_created'] is True, report
           assert report['agents_max'] == 16, report
           assert report['corpus_partitions'] == [4, 16], report
-          assert len(report['tabs']) == 3, report
+          assert len(report['tabs']) == 4, report
+          assert report['mission_controller'] is True, report
           print(report)
           PY
   qt6-desktop-ui:

@@ -95,7 +95,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "dist\installers" | Out-Null
-          Compress-Archive -Path "dist\ironasu-studio\*" -DestinationPath "dist\installers\ironasu-studio-1.7.0-windows-x64-portable.zip" -Force
+          Compress-Archive -Path "dist\ironasu-studio\*" -DestinationPath "dist\installers\ironasu-studio-1.8.0-windows-x64-portable.zip" -Force
       - name: Build offline Windows setup
         shell: pwsh
         run: |

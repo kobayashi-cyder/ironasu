@@ -1,5 +1,13 @@
 # ironasu
 
+**v1.8.0 — Durable Mission Controller:** GitHub-style software missions can now
+create a bounded task DAG, run up to 16 read-only agent sessions (2 model calls
+by default), persist progress in SQLite, verify approved project checks, and
+attempt up to two explicit permission-gated repairs. Qt6 gains a **ミッション**
+tab; `ironasu-mission` offers the same workflow from the terminal. Editing and
+test execution are **off by default**; see [mission documentation](docs/mission.md).
+This is a bounded development harness, not an unrestricted computer agent.
+
 **ironasu Studio v1.7.0:** Native PySide6 / Qt6 desktop interface replaces the previous Tk version as the default on Windows. The UI uses no browser or embedded WebView and provides drag-resizable panels, high-DPI support, Japanese-font-aware typography, rounded dark controls, chat/Reasoning telemetry, model downloads and the 16-agent corpus workflow. Install the bundled Windows EXE or use `pip install -e ".[desktop]"`. Previous UI entrypoints remain as `ironasu-studio-tk` and `ironasu-studio-web`. See [Qt6 desktop documentation](docs/qt-desktop.md).
 
 ## Q4 adoption quality gate

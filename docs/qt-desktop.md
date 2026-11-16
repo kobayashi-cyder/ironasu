@@ -1,6 +1,6 @@
-# ironasu Studio v1.7.0 — standalone PySide6 / Qt6 desktop UI
+# ironasu Studio v1.8.0 — standalone PySide6 / Qt6 desktop UI
 
-Version 1.7 makes the **PySide6/Qt6 native desktop app** the default for
+Version 1.8 makes the **PySide6/Qt6 native desktop app** the default for
 `ironasu-studio` and `ironasu-desktop`. No Chrome, Edge, embedded WebView,
 local HTTP UI server, CDN, or Tk widgets are used by the Qt entrypoint.
 
@@ -98,6 +98,10 @@ QT_QPA_PLATFORM=offscreen python -m ironasu.qt_desktop --smoke-gui qt-smoke.json
 ```
 
 The smoke diagnostic writes JSON without contacting a model server.
+
+## Mission Controller
+
+The fourth tab provides bounded, persisted Plan→Act→Verify→Repair coding missions, up to 16 agent sessions, read-only defaults, explicit write/test permission prompts, separate model-call slots, SQLite resume and test-based verification. See [Mission guide](mission.md).
 
 ## Privacy and limitations
 

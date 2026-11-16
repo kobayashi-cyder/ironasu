@@ -21,12 +21,13 @@ from .compat import AutoHTTPBackend, PRESETS
 from .core import AdaptiveEngine, Config, HTTPBackend, InferenceError
 from .desktop_logic import GenerationStats, SSEEvents, extract_reasoning, extract_text, normalized_model_selection
 from .corpus_agents import CorpusAgentTeam, MAX_CORPUS_CHARS, split_corpus, split_segments
+from .mission import MissionController, MissionJournal
 from .models import ModelManager
 from .native_models import NativeModelManager
 from .runtime import ManagedGGUFRuntime, RuntimeBackendMux
 from .studio import configure, parser as studio_parser
 
-VERSION = "1.7.0"
+VERSION = "1.8.0"
 
 # Kept import-light: --help and --self-test can be invoked on a system without
 # Qt installed. Qt is imported inside build_ui()/main() only.
@@ -198,6 +199,7 @@ def build_ui():
         stream_delta = Signal(int, int, str, str)
         generation_done = Signal(int, int, str, object, object)
         corpus_progress = Signal(int, int, int, int)
+        mission_progress = Signal(object)
 
     class MessageCard(QFrame):
         def __init__(self, msg):
@@ -262,6 +264,9 @@ def build_ui():
             self.chat_busy = False
             self.agent_busy = False
             self.agent_cancel = Event()
+            self.mission_busy = False
+            self.mission_cancel = Event()
+            self.mission_report = None
             self.chat_cancel = Event()
             self.stream_lock = Lock()
             self.active_stream = None
@@ -271,6 +276,7 @@ def build_ui():
             self.bridge.stream_delta.connect(self._stream_delta)
             self.bridge.generation_done.connect(self._generation_done)
             self.bridge.corpus_progress.connect(self._agent_progress)
+            self.bridge.mission_progress.connect(self._mission_event)
             self.native_results = []
             self.native_files = []
             self.native_installed = []
@@ -369,6 +375,7 @@ def build_ui():
             self._chat_tab()
             self._library_tab()
             self._agents_tab()
+            self._mission_tab()
 
         def _inspector(self):
             shell = frame("inspector")
@@ -665,6 +672,278 @@ def build_ui():
             rl.addLayout(rr)
             splitter.setSizes([400, 420])
             self.tabs.addTab(page, "エージェント ×16")
+
+        def _mission_tab(self):
+            page = QWidget()
+            lay = col_layout(page, 0, 12)
+            title = row_layout()
+            title.addWidget(label("Mission Controller · 開発任務", kind="title"))
+            title.addStretch()
+            title.addWidget(label("最大16エージェント / 明示的な操作権限 / SQLite復旧",
+                                  kind="caption", wrap=True))
+            lay.addLayout(title)
+            vertical = QSplitter(Qt.Orientation.Vertical)
+            vertical.setChildrenCollapsible(False)
+            lay.addWidget(vertical, 1)
+            form, fl = box("01 · 任務と作業領域")
+            vertical.addWidget(form)
+            fl.addWidget(label("達成したい目標（計画 → 実装 → 検証 → 修復）", kind="caption"))
+            self.mission_goal = QPlainTextEdit()
+            self.mission_goal.setPlaceholderText("例：リポジトリの既存テストを確認し、原因を修正してください。")
+            self.mission_goal.setFixedHeight(95)
+            fl.addWidget(self.mission_goal)
+            row = row_layout()
+            row.addWidget(label("作業フォルダー", kind="caption"))
+            self.mission_workspace = QLineEdit(str(Path.home()))
+            row.addWidget(self.mission_workspace, 1)
+            row.addWidget(button("参照…", self._mission_choose_folder))
+            fl.addLayout(row)
+            row = row_layout()
+            row.addWidget(label("エージェント", kind="caption"))
+            self.mission_workers = QSpinBox()
+            self.mission_workers.setRange(1, 16)
+            self.mission_workers.setValue(4)
+            row.addWidget(self.mission_workers)
+            row.addWidget(label("モデル同時", kind="caption"))
+            self.mission_slots = QSpinBox()
+            self.mission_slots.setRange(1, 16)
+            self.mission_slots.setValue(2)
+            row.addWidget(self.mission_slots)
+            row.addWidget(label("修復上限", kind="caption"))
+            self.mission_repairs = QSpinBox()
+            self.mission_repairs.setRange(0, 5)
+            self.mission_repairs.setValue(2)
+            row.addWidget(self.mission_repairs)
+            row.addStretch()
+            fl.addLayout(row)
+            row = row_layout()
+            self.mission_writes = QCheckBox("ファイル変更を許可")
+            self.mission_tests = QCheckBox("検証コマンドの実行を許可")
+            row.addWidget(self.mission_writes)
+            row.addWidget(self.mission_tests)
+            row.addStretch()
+            fl.addLayout(row)
+            fl.addWidget(label(
+                "既定は読み取り専用。編集許可時は作業領域の競合を防ぐため"
+                "1ワーカーずつ実行します。テストはプロジェクト内のコードを実行します。",
+                kind="caption", wrap=True))
+            row = row_layout()
+            row.addWidget(label("確認したい成果物（相対パス／カンマ区切り）", kind="caption"))
+            self.mission_files = QLineEdit()
+            self.mission_files.setPlaceholderText("例：src/fixed.py, tests/test_fixed.py")
+            row.addWidget(self.mission_files, 1)
+            fl.addLayout(row)
+            actions = row_layout()
+            self.mission_start = button("新しい任務を開始", self._mission_new, primary=True)
+            actions.addWidget(self.mission_start)
+            self.mission_resume = button("保存した任務を再開", self._mission_resume)
+            actions.addWidget(self.mission_resume)
+            self.mission_stop = button("停止", self._mission_stop)
+            self.mission_stop.setEnabled(False)
+            actions.addWidget(self.mission_stop)
+            actions.addStretch()
+            fl.addLayout(actions)
+
+            results, rl = box("02 · 実行ログ・検証結果・復旧")
+            vertical.addWidget(results)
+            row = row_layout()
+            row.addWidget(label("任務ID", kind="caption"))
+            self.mission_id = QLineEdit()
+            self.mission_id.setPlaceholderText("再開する任務のID")
+            row.addWidget(self.mission_id, 1)
+            row.addWidget(button("保存済みを表示", self._mission_refresh))
+            rl.addLayout(row)
+            self.mission_recent = QListWidget()
+            self.mission_recent.setMaximumHeight(90)
+            self.mission_recent.currentItemChanged.connect(self._mission_pick)
+            rl.addWidget(self.mission_recent)
+            self.mission_status = label(
+                "未実行 · 結果はSQLiteに保存。停止後の再開には同じ作業フォルダーと任務IDを指定。",
+                kind="caption", wrap=True)
+            rl.addWidget(self.mission_status)
+            self.mission_output = QPlainTextEdit()
+            self.mission_output.setReadOnly(True)
+            self.mission_output.setPlaceholderText(
+                "各タスクの実行状況、検証の合否、修復回数をここに表示します。"
+                "LLMが「完了」と返すだけでは成功扱いにしません。")
+            rl.addWidget(self.mission_output, 1)
+            row = row_layout()
+            row.addWidget(label(
+                "Git/テスト/生成物で確認。外部サービス操作や任意シェル実行は許可しません。",
+                kind="caption", wrap=True), 1)
+            row.addWidget(button("レポートJSON保存", self._mission_export))
+            rl.addLayout(row)
+            vertical.setSizes([430, 370])
+            self.tabs.addTab(page, "ミッション")
+            # Do not create .ironasu files just by opening a UI tab.
+            # Explicit refresh / mission creation handles workspace state.
+
+        def _mission_choose_folder(self):
+            result = QFileDialog.getExistingDirectory(
+                self, "任務の作業フォルダー", self.mission_workspace.text())
+            if result:
+                self.mission_workspace.setText(result)
+                self._mission_refresh()
+
+        def _mission_refresh(self):
+            try:
+                folder = Path(self.mission_workspace.text()).expanduser().resolve(strict=True)
+                if not folder.is_dir():
+                    raise ValueError("作業フォルダーが存在しません")
+                self.mission_recent.clear()
+                if not (folder / ".ironasu" / "missions.sqlite").is_file():
+                    return
+                rows = MissionJournal(folder).recent()
+                for item in rows:
+                    text = f"{item['id']} · {item['state']} · {item['goal'][:58]}"
+                    self.mission_recent.addItem(text)
+                    self.mission_recent.item(self.mission_recent.count()-1).setData(
+                        Qt.ItemDataRole.UserRole, item["id"])
+            except (OSError, ValueError) as exc:
+                self.mission_status.setText("保存済み任務一覧: " + str(exc)[:130])
+
+        def _mission_pick(self, item, _previous):
+            if item is not None and not self.mission_busy:
+                self.mission_id.setText(item.data(Qt.ItemDataRole.UserRole))
+
+        def _mission_new(self):
+            self._mission_execute(False)
+
+        def _mission_resume(self):
+            self._mission_execute(True)
+
+        def _mission_execute(self, resume):
+            if self.mission_busy:
+                return
+            goal = self.mission_goal.toPlainText().strip()
+            identifier = self.mission_id.text().strip() if resume else uuid4().hex[:16]
+            if resume and not identifier:
+                self._error("再開する任務IDを選択・入力してください。")
+                return
+            if not resume and not goal:
+                self._error("任務の目標を入力してください。")
+                return
+            folder = Path(self.mission_workspace.text()).expanduser()
+            if not folder.is_dir():
+                self._error("作業フォルダーが存在しません。")
+                return
+            permits_writes = self.mission_writes.isChecked()
+            permits_tests = self.mission_tests.isChecked()
+            if permits_writes or permits_tests:
+                accepted = QMessageBox.question(
+                    self, "権限の確認",
+                    "この任務に許可する操作:\n"
+                    + ("・作業フォルダー内のファイル編集\n" if permits_writes else "")
+                    + ("・PythonテストやGit検査の実行（プロジェクトのコードが動きます）\n"
+                       if permits_tests else "")
+                    + "\n明示的に許可しますか？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No)
+                if accepted != QMessageBox.StandardButton.Yes:
+                    return
+            endpoint = self.mux.endpoint().get("url")
+            if not isinstance(endpoint, str) or not endpoint:
+                self._error("接続先の推論エンジンを先に選択してください。")
+                return
+            from urllib.parse import urlsplit
+            if urlsplit(endpoint).hostname not in ("127.0.0.1", "localhost", "::1"):
+                self._error("GUIのミッション機能はローカル推論エンジンのみ使用できます。")
+                return
+            selected = self.model_combo.currentText()
+            installed = [self.model_combo.itemText(i) for i in range(self.model_combo.count())
+                         if self.model_combo.itemText(i) not in ("auto", "fast", "quality")]
+            model = selected if selected in installed else installed[0] if installed else None
+            if not model:
+                self._error("使用するローカルモデルを選択してください。")
+                return
+            api_key = self.config.backend_key
+            if self.managed.model_id() == model and self.managed._backend is not None:
+                api_key = self.managed._backend.config.backend_key
+            artifact_paths = tuple(x.strip() for x in
+                                   self.mission_files.text().split(",") if x.strip())
+            self.mission_cancel = Event()
+            self.mission_busy = True
+            self.mission_id.setText(identifier)
+            self.mission_start.setEnabled(False)
+            self.mission_resume.setEnabled(False)
+            self.mission_stop.setEnabled(True)
+            self.mission_status.setText("実行中: " + identifier)
+            self.mission_output.appendPlainText(
+                "\n▶ " + ("再開" if resume else "新規任務") + ": " + identifier)
+            workers, slots, repairs = (
+                self.mission_workers.value(), self.mission_slots.value(),
+                self.mission_repairs.value())
+            stop = self.mission_cancel
+            def work():
+                mission = MissionController(
+                    folder, endpoint=endpoint, model=model, api_key=api_key)
+                return mission.run(
+                    goal=None if resume else goal, mission_id=identifier,
+                    resume=resume, workers=workers, model_slots=slots,
+                    max_repairs=repairs, allow_writes=permits_writes,
+                    allow_tests=permits_tests, checks=("compileall", "git_diff_check"),
+                    accept_files=artifact_paths, cancel=stop,
+                    progress=lambda e: self.bridge.mission_progress.emit(e))
+            self._run(work, self._mission_done, self._mission_failed)
+
+        def _mission_event(self, event):
+            if self._closed:
+                return
+            row = f"[{event['kind']}] {event['detail']}"
+            self.mission_output.appendPlainText(row)
+            self.mission_status.setText(row[:160])
+
+        def _mission_done(self, report):
+            self.mission_busy = False
+            self.mission_report = report
+            self.mission_start.setEnabled(True)
+            self.mission_resume.setEnabled(True)
+            self.mission_stop.setEnabled(False)
+            self.mission_status.setText(
+                ("検証成功" if report.verified else "未検証／要対応") +
+                f" · {report.state} · 修復{report.repairs}回")
+            self.mission_output.appendPlainText(
+                "\n【検証結果】\n" + report.reason + "\n" +
+                "\n".join(f"{t['task_id']}: {t['state']} {t['error'][:140]}"
+                          for t in report.tasks) + "\n" +
+                "\n".join(f"{c['kind']}: {'PASS' if c['passed'] else 'FAIL'}"
+                          for c in report.checks))
+            self._mission_refresh()
+
+        def _mission_failed(self, error):
+            self.mission_busy = False
+            self.mission_start.setEnabled(True)
+            self.mission_resume.setEnabled(True)
+            self.mission_stop.setEnabled(False)
+            self._error(error)
+
+        def _mission_stop(self):
+            self.mission_cancel.set()
+            self.mission_stop.setEnabled(False)
+            self.mission_status.setText("停止要求済み · 実行中のモデル呼び出しは完了待ち")
+
+        def _mission_export(self):
+            identifier = self.mission_id.text().strip()
+            if not identifier:
+                self._error("任務IDを選んでください。")
+                return
+            path, _ = QFileDialog.getSaveFileName(
+                self, "任務レポート保存", "ironasu-mission.json", "JSON (*.json)")
+            if not path:
+                return
+            folder = Path(self.mission_workspace.text())
+            endpoint = self.mux.endpoint().get("url") or "http://127.0.0.1:1234/v1"
+            model = self.model_combo.currentText() or "unknown"
+            def dump():
+                journal = MissionJournal(folder)
+                report = MissionController(
+                    folder, endpoint=endpoint, model=model).report(identifier)
+                Path(path).write_text(json.dumps({
+                    "report": report.as_dict(), "events": journal.events(identifier, 500),
+                }, ensure_ascii=False, indent=2), encoding="utf-8")
+                return path
+            self._run(dump, lambda name: self.mission_status.setText(
+                "レポートを保存: " + name), self._error)
 
         def _render_sessions(self):
             self.session_list.blockSignals(True)
@@ -1214,6 +1493,7 @@ def build_ui():
             self._closed = True
             self.chat_cancel.set()
             self.agent_cancel.set()
+            self.mission_cancel.set()
             self.poll_timer.stop()
             with self.stream_lock:
                 stream = self.active_stream
@@ -1284,7 +1564,7 @@ def main(argv: list[str] | None = None) -> int:
         screenshot = os.environ.get("IRONASU_QT_SCREENSHOT")
         if screenshot:
             root = Path(screenshot)
-            for tab, suffix in ((0, ""), (1, "-models"), (2, "-agents")):
+            for tab, suffix in ((0, ""), (1, "-models"), (2, "-agents"), (3, "-mission")):
                 window.tabs.setCurrentIndex(tab)
                 app.processEvents()
                 path = root if not suffix else root.with_name(root.stem + suffix + root.suffix)
@@ -1296,6 +1576,7 @@ def main(argv: list[str] | None = None) -> int:
             "tabs": [window.tabs.tabText(i) for i in range(window.tabs.count())],
             "agents_max": 16, "corpus_partitions": [4, 16],
             "model_management": window.native_tree.columnCount() == 2,
+            "mission_controller": not window.mission_writes.isChecked() and not window.mission_tests.isChecked(),
             "splitter_panels": window.main_splitter.count(),
             "browser_required": False,
         }

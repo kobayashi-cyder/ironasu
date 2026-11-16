@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ironasu"
-version = "1.7.0"
+version = "1.8.0"
 description = "Adaptive LLM gateway, out-of-core inference, coding harness and experimental speculation scheduling"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -27,6 +27,7 @@ ironasu-studio-tk = "ironasu.desktop:main"
 ironasu-studio-web = "ironasu.studio:main"
 ironasu-harness = "ironasu.harness:main"
 ironasu-team = "ironasu.team:main"
+ironasu-mission = "ironasu.mission:main"
 ironasu-benchmark-ab = "ironasu.benchmark:main"
 ironasu-regression-gate = "ironasu.regression:main"
 ironasu-benchmark-load = "ironasu.load:main"
