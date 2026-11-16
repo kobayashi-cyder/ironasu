@@ -1,4 +1,4 @@
-# ironasu Studio Desktop v1.6 — native window and 16 corpus agents
+# ironasu Studio Desktop v1.6.1 — native window and optimised 16 corpus agents
 
 **Default: a standalone Windows desktop app, not a browser.**
 
@@ -62,10 +62,13 @@ the universal wheel also supports native Tk if the OS provides Tcl/Tk.
 
 Splitting is ordered and lossless: concatenating the 4 or 16 partitions
 recreates every original character. Boundaries prefer nearby newlines.
-Each partition is processed in sequential subsegments of at most 8000
-characters, with incremental compression. This avoids silently truncating
-large chunks. It is NOT lossless semantic compression: LLM summaries may
-omit details, and important findings must be checked against the original.
+Each partition is processed as adaptive subsegments of at most 8000
+characters (around 4096 near dense issue/heading markers), with exact-duplicate
+single-flight reuse across workers and bounded hierarchical map/reduce.
+The original text is split **losslessly**; model summaries remain lossy and
+must be checked against the original. The UI and JSON export show actual
+model calls, duplicate segment requests avoided and a source-position/SHA-256
+evidence ledger. Details: [Parallel corpus optimisation](corpus-optimization.md).
 
 16 agents means 16 independent lightweight sessions, NOT 16 GPU model
 instances. Model calls default to at most two concurrent requests, even

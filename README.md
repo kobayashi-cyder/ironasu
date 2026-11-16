@@ -34,6 +34,8 @@ See [native desktop and corpus agents](docs/desktop.md).
 
 ## ironasu Studio (offline Web UI)
 
+**v1.6.1 agent optimisation:** Native 16-worker desktop corpus analysis now uses 4/16 lossless partitions, adaptive subchunks, same-run single-flight reuse of identical text, bounded hierarchical synthesis and source-indexed JSON exports with measured call savings. See [corpus optimisation](docs/corpus-optimization.md).
+
 **New in v1.5:** TTFT/tok/s/Reasoning diagnostics, separate model-provided
 reasoning output, opt-in LM Studio autoload and **one-click startup of a saved
 GGUF** using an installed llama-server runtime. Model download and startup are

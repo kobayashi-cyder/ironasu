@@ -51,7 +51,7 @@ def desktop_parser() -> argparse.ArgumentParser:
                         help="Write a JSON environment check without launching a window")
     parser.add_argument("--smoke-gui", metavar="FILE",
                         help="Create the real native window off-screen and write a diagnostic report")
-    parser.add_argument("--version-desktop", action="version", version="ironasu Desktop 1.6.0")
+    parser.add_argument("--version-desktop", action="version", version="ironasu Desktop 1.6.1")
     return parser
 
 
@@ -63,7 +63,7 @@ def desktop_self_test(path: str) -> None:
         "browser_required": False,
         "http_server_required": False,
         "tkinter_available": find_spec("tkinter") is not None,
-        "studio_version": "1.6.0",
+        "studio_version": "1.6.1",
     }
     target = Path(path).expanduser()
     target.write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -640,9 +640,19 @@ class DesktopWindow:
         self.agent_state.config(
             text=("完了" if report.complete else "不完全 / 一部失敗または中断")
             + f" · {report.corpus_chars:,}文字 / {report.partitions}分割 / "
-              f"{report.total_segments}セグメント")
+              f"{report.total_segments}セグメント（固有{report.unique_segments}・"
+              f"重複再利用{report.cache_hits}）")
         self.agent_output.config(state="normal")
         self.agent_output.delete("1.0", "end")
+        self.agent_output.insert(
+            "end",
+            "【実行効率・中間成果物】\n"
+            f"固有チャンク: {report.unique_segments} / 処理チャンク: {report.total_segments}\n"
+            f"重複した分析の再利用: {report.cache_hits}件（同一実行内・完全一致のみ）\n"
+            f"実際のモデル呼び出し: {report.model_calls}件"
+            "（区画統合・全体統合を含む）\n"
+            "各結果はモデル生成の要約です。原文照合はエビデンス索引を参照。\n\n"
+        )
         self.agent_output.insert("end", "【統合結果】\n" + (
             report.synthesis or "全パートの分析が成功していないため完全な統合結果はありません")
             + "\n\n")
@@ -653,6 +663,13 @@ class DesktopWindow:
             if part.error:
                 self.agent_output.insert("end", "エラー: " + part.error + "\n")
             self.agent_output.insert("end", (part.summary or "—") + "\n\n")
+        self.agent_output.insert(
+            "end", "【原文照合索引（先頭30件、JSON保存ですべて出力）】\n")
+        for ref in report.evidence[:30]:
+            self.agent_output.insert(
+                "end",
+                f"{ref.label} · 文字{ref.start}-{ref.end} · SHA-256 {ref.sha256[:16]}…\n"
+            )
         self.agent_output.config(state="disabled")
 
     def stop_agents(self) -> None:
@@ -676,8 +693,12 @@ class DesktopWindow:
             "workers": report.workers, "model_slots": report.model_slots,
             "corpus_chars": report.corpus_chars,
             "total_segments": report.total_segments,
+            "unique_segments": report.unique_segments,
+            "cache_hits": report.cache_hits,
+            "model_calls": report.model_calls,
             "synthesis": report.synthesis,
             "parts": [part.__dict__ for part in report.parts],
+            "evidence": [ref.__dict__ for ref in report.evidence],
         }
         try:
             Path(selected).write_text(json.dumps(
