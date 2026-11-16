@@ -393,7 +393,7 @@ class IsolatedMission:
             else:
                 # Only committed content is eligible for verification.
                 dirty = [line for line in git.git(
-                    stage, "status", "--porcelain", "--untracked-files=all).splitlines()
+                    stage, "status", "--porcelain", "--untracked-files=all").splitlines()
                     if not line[3:].replace("\\", "/").startswith(".ironasu/")]
                 if dirty:
                     self.journal.set_state(ident, "needs_review")
