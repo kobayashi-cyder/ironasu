@@ -14,6 +14,7 @@ from .models import ModelManager
 from .native_models import NativeModelManager
 from .runtime import ManagedGGUFRuntime, RuntimeBackendMux
 from .core import HTTPBackend
+from .mobile_agents import MobileJobs
 
 MAX_BODY_BYTES = 2 * 1024 * 1024
 ASSETS = {
@@ -32,11 +33,13 @@ CSP = (
 
 def make_handler(engine: AdaptiveEngine, models: ModelManager | None = None,
                  native: NativeModelManager | None = None,
-                 managed: ManagedGGUFRuntime | None = None):
+                 managed: ManagedGGUFRuntime | None = None,
+                 mobile_jobs: MobileJobs | None = None):
     """A handler factory so HTTP integration tests can use fake backends."""
     settings = engine.config
     models = models or ModelManager(settings)
     native = native or NativeModelManager()
+    mobile_jobs = mobile_jobs or MobileJobs(engine)
 
     class Handler(BaseHTTPRequestHandler):
         def _send_bytes(self, code: int, data: bytes, content_type: str) -> None:
@@ -103,6 +106,11 @@ def make_handler(engine: AdaptiveEngine, models: ModelManager | None = None,
                                          else models.installed(provider)})
                 except InferenceError as exc:
                     self._send(exc.status, {"error": {"message": str(exc)}})
+            elif path.startswith("/mobile/jobs/") and path.count("/") == 3:
+                try:
+                    self._send(200, {"job": mobile_jobs.get(path.rsplit("/", 1)[-1])})
+                except InferenceError as exc:
+                    self._send(exc.status, {"error": {"message": str(exc)}})
             elif path == "/ui/status":
                 discovered = engine.upstream_models()
                 fast, quality = engine.effective_models(discovered)
@@ -155,7 +163,10 @@ def make_handler(engine: AdaptiveEngine, models: ModelManager | None = None,
                 self._send(401, {"error": {"message": "unauthorized"}})
                 return
             path = urlsplit(self.path).path
-            if path not in ("/v1/chat/completions", "/ui/models/download",
+            is_mobile = path in ("/mobile/agents", "/mobile/harness") or (
+                path.startswith("/mobile/jobs/") and path.endswith("/cancel")
+                and path.count("/") == 4)
+            if not is_mobile and path not in ("/v1/chat/completions", "/ui/models/download",
                              "/ui/models/load", "/ui/models/native/cancel",
                              "/ui/models/native/remove", "/ui/runtime/start", "/ui/runtime/stop"):
                 self._send(404, {"error": {"message": "not found"}})
@@ -165,8 +176,18 @@ def make_handler(engine: AdaptiveEngine, models: ModelManager | None = None,
                 return
             try:
                 request = self._read_json(
-                    cap=8192 if path.startswith(("/ui/models/", "/ui/runtime/")) else MAX_BODY_BYTES
+                    cap=(4 * 1024 * 1024 if path == "/mobile/agents" else
+                         8192 if path.startswith(("/ui/models/", "/ui/runtime/")) else MAX_BODY_BYTES)
                 )
+                if path == "/mobile/agents":
+                    self._send(202, {"job": mobile_jobs.start_corpus(request)})
+                    return
+                if path == "/mobile/harness":
+                    self._send(202, {"job": mobile_jobs.start_harness(request)})
+                    return
+                if path.startswith("/mobile/jobs/") and path.endswith("/cancel"):
+                    self._send(200, {"job": mobile_jobs.cancel(path.split("/")[3])})
+                    return
                 if path == "/ui/runtime/start":
                     if managed is None:
                         raise InferenceError("Managed runtime unavailable", 501)
