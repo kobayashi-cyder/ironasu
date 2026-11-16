@@ -29,8 +29,10 @@ class LocalEngine(private val appContext: Context) {
                 LlmInferenceSession.LlmInferenceSessionOptions.builder()
                     .setTopK(40).setTopP(0.9f).setTemperature(0.7f).build()
             )
-            try { session.generateResponse(prompt) }
-            finally { session.close() }
+            try {
+                session.addQueryChunk(prompt)
+                session.generateResponse()
+            } finally { session.close() }
         }
     }
 
