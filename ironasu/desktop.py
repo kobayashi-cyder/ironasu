@@ -341,7 +341,8 @@ class DesktopWindow:
                     "token usageを返す場合のみ算出します。",
                     color=MUTED, size=8, bg=SURFACE, justify="left").pack(anchor="w")
         self.load_note = self._label(
-            right, "稼働中: —  /  待機中: —", color=MUTED, size=8, bg=SURFACE)
+            right, "稼働中: —  /  待機中: —\n上流呼出回避: —  /  再利用率: —",
+            color=MUTED, size=8, bg=SURFACE)
         self.load_note.pack(anchor="w", pady=(18, 0))
 
     def _build_library(self) -> None:
@@ -776,8 +777,13 @@ class DesktopWindow:
         if self.closed:
             return
         snapshot = self.engine.diagnostic_snapshot()
+        observed = snapshot.get("efficiency", {}).get("observed", {})
+        reuse = snapshot.get("efficiency", {}).get("derived", {}).get("response_reuse_fraction")
+        reuse_text = "—" if reuse is None else f"{reuse * 100:.1f}%"
         self.load_note.config(text="稼働中: " + str(snapshot.get("active_requests", 0)) +
-                              "  /  待機中: " + str(snapshot.get("waiting_requests", 0)))
+                              "  /  待機中: " + str(snapshot.get("waiting_requests", 0)) +
+                              "\n上流呼出回避: " + str(observed.get("avoided_upstream_requests", 0)) +
+                              "  /  再利用率: " + reuse_text)
         state = self.managed.status()
         summary = state["state"] + " · " + (state.get("detail") or "")
         if summary != self.last_status:
@@ -933,6 +939,7 @@ class DesktopWindow:
             "top_p": float(self.top_p_var.get()), "max_tokens": self.tokens_var.get(),
             "x_ironasu_mode": mode,
             "x_ironasu_cache": True,
+            "x_ironasu_budget": {"preserve_auto_quality": True},
         }
         if selected:
             payload["x_ironasu_model"] = selected
