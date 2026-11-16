@@ -1256,7 +1256,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         QApplication, MainWindow, QFont, QFontDatabase = build_ui()
     except ImportError as exc:
-        raise SystemExit("PySide6 is required for the native Qt desktop. Install: pip install 'ironasu[desktop]'") from exc
+        raise SystemExit("Qt6 desktop cannot load required modules: " + str(exc) + ". Install: pip install 'ironasu[desktop]'") from exc
     app = QApplication.instance() or QApplication([])
     # Qt6 automatically handles Windows per-monitor DPI. No fixed tk/scaling.
     app.setStyle("Fusion")
