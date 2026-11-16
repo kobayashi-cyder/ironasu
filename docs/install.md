@@ -1,4 +1,4 @@
-# ironasu Studio installation and backend compatibility (v1.8.0)
+# ironasu Studio installation and backend compatibility (v1.9.0)
 
 **Default desktop: PySide6 / Qt6 native Windows application.** The program
 runs in its own independent window; Chrome/Edge and a locally served browser
@@ -11,8 +11,8 @@ installed llama-server binary for standalone GGUF) remains separate.
 2. Select the successful latest **main** run and download the
    `ironasu-studio-windows-x64-offline-installers` artifact.
 3. Extract the downloaded artifact ZIP. Run
-   `ironasu-studio-1.8.0-windows-x64-setup.exe` or extract the inner
-   `ironasu-studio-1.8.0-windows-x64-portable.zip` and launch
+   `ironasu-studio-1.9.0-windows-x64-setup.exe` or extract the inner
+   `ironasu-studio-1.9.0-windows-x64-portable.zip` and launch
    `ironasu-studio.exe`.
 4. The new Qt6 application opens a native independent window with Chat, Model management, エージェント ×16 and Mission Controller tabs. No browser URL is involved.
 5. Start a model inference backend (LM Studio is on 127.0.0.1:1234 by
