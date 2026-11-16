@@ -1263,6 +1263,12 @@ def main(argv: list[str] | None = None) -> int:
     name = next((f for f in japanese_fonts if f in families), "Segoe UI")
     app.setFont(QFont(name, 10))
     app.setStyleSheet(THEME)
+    # The frozen Windows executable includes our own deterministic icon.
+    if getattr(__import__("sys"), "frozen", False):
+        from PySide6.QtGui import QIcon
+        icon_path = Path(__import__("sys")._MEIPASS) / "ironasu.ico"
+        if icon_path.is_file():
+            app.setWindowIcon(QIcon(str(icon_path)))
     if args.smoke_gui:
         class FakeBackend:
             def list_models(self):
