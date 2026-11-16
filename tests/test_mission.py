@@ -195,6 +195,35 @@ class MissionTests(unittest.TestCase):
         self.assertEqual(second.repairs, 2)
         self.assertEqual((self.root / "result.txt").read_text(), "verified deliverable")
 
+    def test_paused_repair_resumes_same_session_without_extra_attempt(self):
+        from ironasu.harness import SYSTEM, Store
+        from ironasu.team import TeamTask
+        ident = "repair_paused"
+        self.controller.journal.create(
+            ident, "Produce result", self.controller.endpoint,
+            self.controller.model, (TeamTask("work", "Inspect"),),
+            ("compileall",), ("result.txt",))
+        self.controller.journal.set_task(
+            ident, "work", "succeeded", "Research completed")
+        self.controller.journal.set_state(
+            ident, "repair_paused", attempts=1,
+            verdict={"passed": False, "reason": "No result yet"})
+        store = Store(self.root)
+        sid = "m_" + ident + "_repair_1"
+        store.save(sid, self.root, "paused", [
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content":
+             "A requested acceptance check failed. Create the missing result.txt"},
+        ], [])
+        store.conn.close()
+        report = self.controller.run(
+            mission_id=ident, resume=True,
+            allow_writes=True, allow_tests=True, max_repairs=1)
+        self.assertTrue(report.verified, report)
+        self.assertEqual(report.repairs, 1)
+        self.assertEqual((self.root / "result.txt").read_text(),
+                         "verified deliverable")
+
     def test_cancelled_mission_does_no_model_work(self):
         stop = Event()
         stop.set()
