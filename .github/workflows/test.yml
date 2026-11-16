@@ -28,6 +28,7 @@ jobs:
           ironasu-benchmark-load --help
           ironasu-load-gate --help
           ironasu-benchmark-capture --help
+          ironasu-q4-gate --help
       - name: Run standard-library unit tests
         run: |
           python -m unittest discover -s tests -v
