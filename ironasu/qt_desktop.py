@@ -95,9 +95,7 @@ QTabBar::tab { background: transparent; color: #9db2c0; padding: 12px 19px;
 QTabBar::tab:selected { color: #a5f1d0; border-bottom-color: #8fdfbe; font-weight: 700; }
 QTabBar::tab:hover { color: #f0f6f4; }
 QCheckBox { spacing: 9px; min-height: 27px; }
-QCheckBox::indicator { width: 18px; height: 18px; }
-QCheckBox::indicator:unchecked { background: #12202b; border: 1px solid #506571; border-radius: 5px; }
-QCheckBox::indicator:checked { background: #8fdcbc; border: 1px solid #8fdcbc; border-radius: 5px; }
+/* Keep Qt's native checked indicator so the tick remains visible on HiDPI displays. */
 QScrollArea { border: none; background: transparent; }
 QScrollBar:vertical { background: transparent; width: 10px; margin: 0; }
 QScrollBar::handle:vertical { background: #405461; border-radius: 5px; min-height: 32px; }
