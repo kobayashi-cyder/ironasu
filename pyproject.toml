@@ -41,6 +41,7 @@ ironasu-tune = "ironasu.tuner:main"
 
 ironasu-quantize-q4 = "ironasu.q4:main"
 ironasu-benchmark-q4 = "ironasu.q4_benchmark:main"
+ironasu-q4-gate = "ironasu.q4_gate:main"
 
 ironasu-moe-plan = "ironasu.moe:main"
 ironasu-kimi-inspect = "ironasu.kimi:main"
