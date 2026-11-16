@@ -377,14 +377,14 @@ class MissionController:
                 agent = self._agent(gate, writes=allow_writes,
                                     tests=allow_tests, steps=max_steps)
                 try:
-                    self.journal.set_task(ident, task.task_id, "running")
-                    event("task_started", task.task_id)
                     saved = agent.store.load(session)
                     if record["state"] == "uncertain" and (
                             saved is None or bool(saved["pending"])):
                         # A started side effect must be inspected and manually
                         # resolved in the harness journal before this task resumes.
                         return "UNCERTAIN: manual tool resolution required"
+                    self.journal.set_task(ident, task.task_id, "running")
+                    event("task_started", task.task_id)
                     answer = (agent.run(session, None, resume=True) if saved else
                               agent.run(session, assigned + "\n\nMission goal:\n" + row["goal"]))
                     if answer.startswith("UNCERTAIN"):
