@@ -126,8 +126,8 @@ jobs:
         with:
           name: ironasu-qt6-preview
           path: |
-            /tmp/ironasu-qt-preview.png
-            /tmp/ironasu-qt125-preview.png
+            /tmp/ironasu-qt-preview*.png
+            /tmp/ironasu-qt125-preview*.png
           if-no-files-found: ignore
   stream-integration:
     runs-on: ubuntu-latest
