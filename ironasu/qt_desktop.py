@@ -679,14 +679,21 @@ def build_ui():
             title = row_layout()
             title.addWidget(label("Mission Controller · 開発任務", kind="title"))
             title.addStretch()
-            title.addWidget(label("最大16エージェント / 明示的な操作権限 / SQLite復旧",
+            title.addWidget(label("最大16エージェント · SQLite復旧",
                                   kind="caption", wrap=True))
             lay.addLayout(title)
             vertical = QSplitter(Qt.Orientation.Vertical)
             vertical.setChildrenCollapsible(False)
             lay.addWidget(vertical, 1)
             form, fl = box("01 · 任務と作業領域")
-            vertical.addWidget(form)
+            # At 125%-200% Windows DPI the controls exceed half a short
+            # screen. Scroll the form instead of shrinking/overlapping text.
+            form.setMinimumHeight(560)
+            mission_form_scroll = scroller(form)
+            mission_form_scroll.setMinimumHeight(230)
+            mission_form_scroll.setObjectName("missionFormScroll")
+            self.mission_form_scroll = mission_form_scroll
+            vertical.addWidget(mission_form_scroll)
             fl.addWidget(label("達成したい目標（計画 → 実装 → 検証 → 修復）", kind="caption"))
             self.mission_goal = QPlainTextEdit()
             self.mission_goal.setPlaceholderText("例：リポジトリの既存テストを確認し、原因を修正してください。")
@@ -1593,6 +1600,8 @@ def main(argv: list[str] | None = None) -> int:
             "agents_max": 16, "corpus_partitions": [4, 16],
             "model_management": window.native_tree.columnCount() == 2,
             "mission_controller": not window.mission_writes.isChecked() and not window.mission_tests.isChecked(),
+            "mission_scrollable": window.mission_form_scroll is not None,
+            "mission_goal_height": window.mission_goal.height(),
             "splitter_panels": window.main_splitter.count(),
             "browser_required": False,
         }

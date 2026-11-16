@@ -107,6 +107,8 @@ jobs:
           assert report['splitter_panels'] == 3, report
           assert len(report['tabs']) == 4, report
           assert report['mission_controller'] is True, report
+          assert report['mission_scrollable'] is True, report
+          assert report['mission_goal_height'] >= 85, report
           assert report['model_management'] is True, report
           print(report)
           PY
