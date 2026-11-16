@@ -587,10 +587,7 @@ class AdaptiveEngine:
         if context is not None:
             metadata["context_retrieval"] = context
         if budget and budget.explicit:
-            metadata["execution_budget"] = budget.diagnostic(
-                selected_route=route, observed_pressure=False)
-            # Pressure is intentionally omitted here: the current pressure
-            # may differ from the observation at admission time.
+            metadata["execution_budget"] = budget.diagnostic(selected_route=route)
         return {**result, "_ironasu": metadata}
 
     def diagnostic_snapshot(self) -> dict[str, Any]:
