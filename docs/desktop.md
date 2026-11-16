@@ -1,39 +1,20 @@
-# ironasu Studio Desktop v1.6.1 — native window and optimised 16 corpus agents
+# Legacy Tk Desktop (v1.6.1)
 
-**Default: a standalone Windows desktop app, not a browser.**
+The v1.7.0 default GUI is the native **PySide6/Qt6** window. For the
+current Windows interface and installation instructions, use
+[Qt6 desktop documentation](qt-desktop.md).
 
-Version 1.6 changes the installed ironasu-studio.exe to a native Tk interface.
-It does not open Chrome/Edge, embed a browser engine or bind TCP port 8765.
-The LM Studio inference backend may still listen on port 1234.
+This older guide documents the **optional Tk fallback** only.
+The Tk UI does not open a browser and can still be launched manually:
 
-## Windows setup
-
-Download the successful ironasu-studio-windows-x64-offline-installers artifact
-from https://github.com/kobayashi-cyder/ironasu/actions/workflows/windows-installer.yml
-and run the v1.6 per-user installer inside it. Alternatively extract the
-portable ZIP and run ironasu-studio.exe. Keep the complete extracted folder
-(including the Tcl/Tk support files). The executable runs without separately
-installing Python, Chrome, Node or WebView2.
-
-These community CI installers are unsigned. Verify the GitHub workflow
-provenance; do not disable Windows security protections to install.
-
-From the checked-out repository:
-
-~~~powershell
+```powershell
 cd C:\Users\hazim\ironasu
-git pull --ff-only origin main
 .\.venv\Scripts\python.exe -m pip install -e .
-.\.venv\Scripts\ironasu-studio.exe --provider lmstudio
-~~~
+.\.venv\Scripts\ironasu-studio-tk.exe --provider lmstudio
+```
 
-To keep using the legacy browser UI on purpose:
-~~~powershell
-.\.venv\Scripts\ironasu-studio-web.exe --provider lmstudio --port 8766
-~~~
-
-The native application does not start a localhost UI server. On Linux/macOS
-the universal wheel also supports native Tk if the OS provides Tcl/Tk.
+The legacy Tk fallback requires Tcl/Tk in the local Python environment.
+It is not the default GUI shipped by the Windows v1.7 installer.
 
 ## Native GUI tabs
 

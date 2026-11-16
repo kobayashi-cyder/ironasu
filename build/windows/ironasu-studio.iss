@@ -1,5 +1,5 @@
 #define AppName "ironasu Studio"
-#define AppVersion "1.6.1"
+#define AppVersion "1.7.0"
 #define AppExeName "ironasu-studio.exe"
 
 [Setup]
@@ -8,6 +8,7 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher=ironasu contributors
 AppPublisherURL=https://github.com/kobayashi-cyder/ironasu
+SetupIconFile=..\..\dist\ironasu.ico
 DefaultDirName={localappdata}\Programs\ironasu Studio
 DefaultGroupName=ironasu Studio
 PrivilegesRequired=lowest

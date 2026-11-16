@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ironasu"
-version = "1.6.1"
+version = "1.7.0"
 description = "Adaptive LLM gateway, out-of-core inference, coding harness and experimental speculation scheduling"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 
 [project.optional-dependencies]
 stream = ["torch>=2.4", "safetensors>=0.4", "transformers>=4.49,<5", "accelerate>=1.0"]
+desktop = ["PySide6-Essentials>=6.8,<7"]
 
 [tool.setuptools.packages.find]
 include = ["ironasu*"]
@@ -20,8 +21,9 @@ include = ["ironasu*"]
 
 [project.scripts]
 ironasu = "ironasu.server:serve"
-ironasu-studio = "ironasu.desktop:main"
-ironasu-desktop = "ironasu.desktop:main"
+ironasu-studio = "ironasu.qt_desktop:main"
+ironasu-desktop = "ironasu.qt_desktop:main"
+ironasu-studio-tk = "ironasu.desktop:main"
 ironasu-studio-web = "ironasu.studio:main"
 ironasu-harness = "ironasu.harness:main"
 ironasu-team = "ironasu.team:main"
