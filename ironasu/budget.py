@@ -56,13 +56,12 @@ class RequestBudget:
         """Retain explicit model routing; suppress only pressure-based auto fallback."""
         return observed_pressure and not self.preserve_auto_quality
 
-    def diagnostic(self, *, selected_route: str, observed_pressure: bool) -> dict[str, Any]:
+    def diagnostic(self, *, selected_route: str) -> dict[str, Any]:
         """An explanation with no prompt, model credentials or generated text."""
         return {
             "policy": "explicit" if self.explicit else "legacy",
             "selected_route": selected_route,
             "preserve_auto_quality": self.preserve_auto_quality,
-            "pressure_observed": observed_pressure,
             "max_queue_ms": self.max_queue_ms,
             "cache_permitted": self.allow_cache,
             "limits": ["queue waiting only; backend decode time and GPU memory are not capped"],
