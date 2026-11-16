@@ -74,6 +74,8 @@ class QtDesktopTests(unittest.TestCase):
             self.assertIn("エージェント", report["tabs"][2])
             self.assertIn("ミッション", report["tabs"][3])
             self.assertTrue(report["mission_controller"])
+            self.assertTrue(report["mission_scrollable"])
+            self.assertGreaterEqual(report["mission_goal_height"], 85)
             self.assertTrue(report["model_management"])
             self.assertFalse(report["browser_required"])
 
