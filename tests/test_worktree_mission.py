@@ -127,6 +127,28 @@ class TestIsolatedMissions(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             IsolatedMission(self.ctrl).approve(report.mission_id)
 
+    def test_interrupted_repair_does_not_verify_uncommitted_worktree_changes(self):
+        report = self.launch()
+        self.assertTrue(report.verified)
+        ident = report.mission_id
+        from ironasu.worktree_mission import IsolatedMission
+        isolated = IsolatedMission(self.ctrl)
+        failed = {"passed": False, "reason": "Before repair: failing test"}
+        isolated.save(ident, state="repairing_stage", last=failed)
+        self.ctrl.journal.set_state(ident, "repairing_stage", attempts=1, verdict=failed)
+        stage = Path(report.isolation["worktrees"]) / "candidate"
+        (stage / "README.md").write_text("uncommitted interrupted repair\\n")
+        # If checks were re-run on this dirty worktree, compileall would
+        # succeed and could falsely bless a different, older commit.
+        resumed = self.ctrl.run(
+            mission_id=ident, resume=True, isolated_worktrees=True,
+            allow_writes=True, allow_tests=True, max_repairs=1)
+        self.assertFalse(resumed.verified)
+        self.assertEqual(resumed.state, "repair_uncertain_stage")
+        self.assertEqual(git(self.root, "rev-parse", "HEAD"), self.baseline)
+        with self.assertRaises(ValueError):
+            isolated.approve(ident)
+
     def test_no_write_and_test_permission_is_rejected_before_any_work(self):
         with self.assertRaisesRegex(ValueError, "permissions"):
             self.launch(allow_writes=False)
