@@ -1,5 +1,14 @@
 # ironasu
 
+## Q4 adoption quality gate
+
+**New:** `ironasu-q4-gate` combines the existing `ironasu-benchmark-q4`
+timing/checkpoint report with **independent, paired task-quality scores**.
+It rejects inadequate evidence, per-task quality regressions, unexpectedly
+slow quantization and negligible checkpoint savings. Exact-text parity
+is not mistaken for semantic correctness, and missing GPU/energy measurements
+are never invented. See [Q4 quality gate and validation workflow](docs/q4-quality-gate.md).
+
 ## Adaptive execution budget + evidence dashboard
 
 **New:** the existing gateway now accepts an optional `x_ironasu_budget`
