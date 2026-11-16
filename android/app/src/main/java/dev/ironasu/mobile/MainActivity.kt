@@ -158,7 +158,7 @@ private fun Header(title: String, subtitle: String) {
 }
 
 @Composable
-private fun ChatPage(ui: UiState, scope: CoroutineScope) {
+private fun ColumnScope.ChatPage(ui: UiState, scope: CoroutineScope) {
     Header("チャット", "PCの大型LLMと端末内推論を選択")
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         FilterChip(selected = !ui.offline, onClick = { ui.offline = false },
