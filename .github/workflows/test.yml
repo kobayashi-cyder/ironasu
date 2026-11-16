@@ -20,6 +20,7 @@ jobs:
           ironasu-studio --help
           ironasu-desktop --help
           ironasu-studio-web --help
+          ironasu-studio-tk --help
           ironasu-studio --self-test /tmp/ironasu-desktop-check.json
           python -c "import json; j=json.load(open('/tmp/ironasu-desktop-check.json')); assert j['browser_required'] is False"
           ironasu-team --help
@@ -74,6 +75,42 @@ jobs:
           assert len(report['tabs']) == 3, report
           print(report)
           PY
+  qt6-desktop-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      QT_QPA_PLATFORM: offscreen
+      IRONASU_QT_SCREENSHOT: /tmp/ironasu-qt-preview.png
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Qt6 desktop extra (no browser engine)
+        run: python -m pip install -e '.[desktop]'
+      - name: Run real offscreen PySide6 UI and integration tests
+        run: |
+          python -m unittest tests.test_qt_desktop -v
+          python -m ironasu.qt_desktop --smoke-gui /tmp/ironasu-qt-gui.json
+          python - <<'PY'
+          import json
+          report = json.load(open('/tmp/ironasu-qt-gui.json', encoding='utf-8'))
+          assert report['native_window_created'] is True, report
+          assert report['qt6'] is True, report
+          assert report['browser_required'] is False, report
+          assert report['agents_max'] == 16, report
+          assert report['splitter_panels'] == 3, report
+          assert len(report['tabs']) == 3, report
+          assert report['model_management'] is True, report
+          print(report)
+          PY
+      - name: Upload Qt6 preview from offscreen renderer
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ironasu-qt6-preview
+          path: /tmp/ironasu-qt-preview.png
+          if-no-files-found: ignore
   stream-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 25

@@ -37,6 +37,7 @@ jobs:
           /tmp/ironasu-clean/bin/python -m pip install --no-index --no-deps dist/wheels/*.whl
           /tmp/ironasu-clean/bin/ironasu-studio --help
           /tmp/ironasu-clean/bin/ironasu-desktop --self-test /tmp/ironasu-native-wheel.json
+          /tmp/ironasu-clean/bin/ironasu-studio-tk --help
           cd /tmp
           /tmp/ironasu-clean/bin/python -c "from importlib.resources import files; assert files('ironasu.web').joinpath('index.html').is_file()"
       - uses: actions/upload-artifact@v4
@@ -52,12 +53,13 @@ jobs:
           python-version: "3.12"
           architecture: x64
       - name: Install build tools
-        run: python -m pip install -e . pyinstaller
-      - name: Build standalone native desktop window (bundled Python and Tk)
+        run: python -m pip install -e ".[desktop]" pyinstaller
+      - name: Build standalone PySide6 Qt6 desktop (bundled Python and Qt)
         run: >-
           python -m PyInstaller --noconfirm --clean --windowed --onedir
           --name ironasu-studio --collect-data ironasu.web
-          scripts/ironasu_desktop_entry.py
+          --exclude-module tkinter
+          scripts/ironasu_qt_entry.py
       - name: Smoke-test native window (no browser, no model server)
         shell: pwsh
         run: |
@@ -71,18 +73,18 @@ jobs:
           }
           if ($process.ExitCode -ne 0 -or -not (Test-Path $target)) { throw "Native desktop self-test failed" }
           $report = Get-Content $target -Raw | ConvertFrom-Json
-          if ($report.mode -ne "native-tk-desktop" -or $report.browser_required) { throw "Unexpected browser dependency" }
-          # Hosted Windows runners may not expose an interactive desktop. Only
-          # the actual Tk smoke attempt is best-effort; its outcome is explicit.
+          if ($report.mode -ne "native-qt6-desktop" -or $report.browser_required -or -not $report.qt_available) { throw "Qt6 desktop not bundled correctly" }
+          # Hosted Windows runners may lack an interactive display; the real Qt
+          # widget smoke is mandatory in the offscreen Linux UI test job.
           $process = Start-Process -FilePath $exe -ArgumentList @("--smoke-gui", $smoke) -PassThru
           if (-not $process.WaitForExit(30000)) {
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-            Write-Warning "Tk window smoke timed out in CI (likely noninteractive desktop)"
+            Write-Warning "Qt6 window smoke timed out in CI (noninteractive desktop)"
           } elseif ($process.ExitCode -ne 0 -or -not (Test-Path $smoke)) {
-            Write-Warning "Tk window could not open in CI; real desktop GUI not verified by this step"
+            Write-Warning "Qt6 window could not open on hosted Windows CI; Linux Qt offscreen smoke is required"
           } else {
             $gui = Get-Content $smoke -Raw | ConvertFrom-Json
-            if (-not $gui.native_window_created -or $gui.agents_max -ne 16) {
+            if (-not $gui.native_window_created -or -not $gui.qt6 -or $gui.agents_max -ne 16) {
               throw "Native agent GUI is missing"
             }
           }
@@ -90,7 +92,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "dist\installers" | Out-Null
-          Compress-Archive -Path "dist\ironasu-studio\*" -DestinationPath "dist\installers\ironasu-studio-1.6.1-windows-x64-portable.zip" -Force
+          Compress-Archive -Path "dist\ironasu-studio\*" -DestinationPath "dist\installers\ironasu-studio-1.7.0-windows-x64-portable.zip" -Force
       - name: Build offline Windows setup
         shell: pwsh
         run: |
@@ -116,6 +118,10 @@ jobs:
             throw "Installed desktop executable did not exit"
           }
           if ($process.ExitCode -ne 0 -or -not (Test-Path $report)) { throw "Installed desktop app failed" }
+          $installedReport = Get-Content $report -Raw | ConvertFrom-Json
+          if ($installedReport.mode -ne "native-qt6-desktop" -or -not $installedReport.qt_available) {
+            throw "Installed Qt6 executable is incomplete"
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: ironasu-studio-windows-x64-offline-installers

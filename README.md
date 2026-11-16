@@ -1,5 +1,7 @@
 # ironasu
 
+**ironasu Studio v1.7.0:** Native PySide6 / Qt6 desktop interface replaces the previous Tk version as the default on Windows. The UI uses no browser or embedded WebView and provides drag-resizable panels, high-DPI support, Japanese-font-aware typography, rounded dark controls, chat/Reasoning telemetry, model downloads and the 16-agent corpus workflow. Install the bundled Windows EXE or use `pip install -e ".[desktop]"`. Previous UI entrypoints remain as `ironasu-studio-tk` and `ironasu-studio-web`. See [Qt6 desktop documentation](docs/qt-desktop.md).
+
 ## Q4 adoption quality gate
 
 **New:** `ironasu-q4-gate` combines the existing `ironasu-benchmark-q4`

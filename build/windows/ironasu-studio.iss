@@ -1,5 +1,5 @@
 #define AppName "ironasu Studio"
-#define AppVersion "1.6.1"
+#define AppVersion "1.7.0"
 #define AppExeName "ironasu-studio.exe"
 
 [Setup]

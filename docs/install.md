@@ -1,70 +1,56 @@
-# ironasu Studio installation and backend compatibility (v1.6)
+# ironasu Studio installation and backend compatibility (v1.7.0)
 
-**Desktop default:** Windows v1.6 installs ironasu-studio.exe as a native
-window, not a browser launcher. There is no localhost UI port to open.
-Use ironasu-studio-web for the legacy browser UI. See
-[native window + agent instructions](desktop.md).
+**Default desktop: PySide6 / Qt6 native Windows application.** The program
+runs in its own independent window; Chrome/Edge and a locally served browser
+UI are not required. The model *inference* engine (LM Studio, Ollama or an
+installed llama-server binary for standalone GGUF) remains separate.
 
+## Windows x64: graphical installer and portable ZIP
 
-v1.5は外部モデル管理アプリなしでも、Hugging Faceから公開GGUFモデルを
-直接保存できます。ダウンロードにはインターネット接続が必要ですが、
-保存済みモデルはオフラインで管理できます。推論には別途GGUF対応の実行エンジンが必要です。
-[ネイティブGGUFインストール](native-install.md)を参照してください。
-
-This package installs an **offline-first local Web UI plus an inference gateway**.
-It does not bundle model weights, LM Studio, Ollama, GPU drivers or any model
-execution runtime. Those must be installed and their models downloaded before
-you disconnect from the Internet.
-
-## Windows 10/11 (x64): graphical installer, no Python required
-
-1. Open the [offline installer workflow](https://github.com/kobayashi-cyder/ironasu/actions/workflows/windows-installer.yml).
-2. Select a **successful** run on the main branch and download the
+1. Go to the [Windows installer CI workflow](https://github.com/kobayashi-cyder/ironasu/actions/workflows/windows-installer.yml).
+2. Select the successful latest **main** run and download the
    `ironasu-studio-windows-x64-offline-installers` artifact.
-3. Unzip that artifact and run `ironasu-studio-1.3.0-windows-x64-setup.exe`.
-   The installer is per-user and adds a Start Menu shortcut. It installs
-   completely offline and does not need administrator privileges.
-4. Launch **ironasu Studio** from the Start Menu. A local browser tab opens
-   at `http://127.0.0.1:8765/ui`.
-5. Start a local model server (LM Studio, Ollama, etc.) and **load a model**.
-   Model availability refreshes automatically, including servers started after
-   Studio. If the browser is not available, use another locally installed browser.
+3. Extract the downloaded artifact ZIP. Run
+   `ironasu-studio-1.7.0-windows-x64-setup.exe` or extract the inner
+   `ironasu-studio-1.7.0-windows-x64-portable.zip` and launch
+   `ironasu-studio.exe`.
+4. The new Qt6 application opens a native independent window with Chat,
+   Model management and エージェント ×16 tabs. No browser URL is involved.
+5. Start a model inference backend (LM Studio is on 127.0.0.1:1234 by
+   default), then select its model in the Runtime sidebar.
 
-The workflow also supplies a `-portable.zip` containing a standalone executable:
-extract *all* files to one directory, then run `ironasu-studio.exe`.
-Do not copy only the EXE from the portable ZIP: companion files are required.
+The Windows EXE bundles Python and Qt6 support files, so there is no need
+to separately install either. Keep all files from the extracted portable
+ZIP. The community-built installer is unsigned: verify GitHub Actions
+provenance and do not disable Windows security.
 
-**Signing:** GitHub Actions installers are currently unsigned. Windows may show
-an unknown-publisher warning. Verify that the artifact comes from this
-repository's successful workflow; do not disable system security to install it.
+## Python source or wheel installation
 
-## Python installation (Windows, macOS, Linux)
+For the *Qt desktop*, install the optional GUI extra:
 
-Python 3.10 or newer is required for this method. The core UI/gateway has
-**zero third-party runtime dependencies**.
-
-Online installation from a trusted local checkout:
-
-```sh
-python -m pip install .
-ironasu-studio
+```powershell
+cd C:\Users\hazim\ironasu
+git switch main
+git pull --ff-only origin main
+.\.venv\Scripts\python.exe -m pip install -e ".[desktop]"
+.\.venv\Scripts\ironasu-studio.exe --provider lmstudio
 ```
 
-Offline wheel installation (wheel downloaded and copied to the PC in advance):
+The universal Python wheel deliberately keeps the model gateway/harness
+dependency-light. Installing it without the `desktop` extra supports core
+tools and CLI self-test but not actual Qt window startup. The Windows installer
+**does** contain PySide6/Qt6.
 
-```sh
-python -m pip install --no-index --no-deps ./ironasu-1.3.0-py3-none-any.whl
-ironasu-studio --provider auto
-```
+Legacy alternatives are still opt-in:
+- `ironasu-studio-tk`: older independent Tk window;
+- `ironasu-studio-web --provider lmstudio --port 8766`: browser-based UI;
+- `python -m ironasu`: original local inference gateway.
 
-Get the wheel from the `ironasu-studio-offline-python-wheel` CI artifact.
-Unlike source installation, installing this ready-built wheel does **not**
-require setuptools or a network connection. You can also run directly from
-the source root using `python -m ironasu.studio` without installing a wheel.
-
-The original `python -m ironasu` and `ironasu` commands retain the
-manual-configuration gateway behavior; the new `ironasu-studio` entrypoint
-enables local-provider discovery and browser launching.
+For GPU inference of directly downloaded GGUF models, install a compatible
+`llama-server` binary separately. Model downloads alone do not supply a
+GPU runtime. See [Qt6 desktop details](qt-desktop.md),
+[managed GGUF runner](runtime.md) and
+[direct model downloads](native-install.md).
 
 ## Supported local OpenAI-compatible endpoints
 
