@@ -8,7 +8,7 @@ local HTTP UI server, CDN, or Tk widgets are used by the Qt entrypoint.
 
 Use the **Windows x64 installer or portable ZIP** built by the official
 [Windows packaging workflow](https://github.com/kobayashi-cyder/ironasu/actions/workflows/windows-installer.yml).
-The installer packages Python, PySide6, Qt6 Windows plugins and required
+The installer packages Python, PySide6 Essentials, Qt6 Windows plugins and required
 support files. Python and PySide6 do **not** need to be separately installed
 when using this EXE.
 
