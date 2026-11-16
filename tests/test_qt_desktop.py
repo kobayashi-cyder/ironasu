@@ -41,7 +41,7 @@ class QtDesktopTests(unittest.TestCase):
             )
             self.assertEqual(process.returncode, 0, process.stderr)
             data = output.read_bytes()
-            self.assertEqual(data[:6], b"\\x00\\x00\\x01\\x00\\x07\\x00")
+            self.assertEqual(data[:6], bytes((0, 0, 1, 0, 7, 0)))
             self.assertIn(b"PNG", data)
             self.assertLess(len(data), 100000)
 
