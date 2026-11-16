@@ -359,7 +359,7 @@ class MissionController:
                 raise ValueError("Mission workspace/model/endpoint mismatch")
             if row["state"] == "verified":
                 return self.report(ident)
-            previous_repair = row["state"] == "repairing"
+            previous_repair = row["state"] in ("repairing", "repair_uncertain")
             tasks = parse_plan(json.loads(row["plan"]))
             kinds = tuple(json.loads(row["checks"]))
             paths = tuple(json.loads(row["artifacts"]))
@@ -373,8 +373,6 @@ class MissionController:
                 record = self.journal.task(ident, task.task_id)
                 if record["state"] == "succeeded":
                     return record["output"]
-                if record["state"] == "uncertain":
-                    return "UNCERTAIN: manual resolution required"
                 session = f"m_{ident}_{task.task_id}"
                 agent = self._agent(gate, writes=allow_writes,
                                     tests=allow_tests, steps=max_steps)
@@ -382,6 +380,11 @@ class MissionController:
                     self.journal.set_task(ident, task.task_id, "running")
                     event("task_started", task.task_id)
                     saved = agent.store.load(session)
+                    if record["state"] == "uncertain" and (
+                            saved is None or bool(saved["pending"])):
+                        # A started side effect must be inspected and manually
+                        # resolved in the harness journal before this task resumes.
+                        return "UNCERTAIN: manual tool resolution required"
                     answer = (agent.run(session, None, resume=True) if saved else
                               agent.run(session, assigned + "\n\nMission goal:\n" + row["goal"]))
                     if answer.startswith("UNCERTAIN"):
@@ -443,8 +446,10 @@ class MissionController:
                     self.journal.set_state(ident, "unverified", verdict=verdict)
                     event("unverified", "Repair budget exhausted")
                     break
+                previous_pending_repair = previous_repair
                 if previous_repair:
                     previous_repair = False
+                    self.journal.set_state(ident, "repairing", verdict=verdict)
                 else:
                     attempts += 1
                     self.journal.set_state(ident, "repairing", attempts=attempts,
@@ -454,6 +459,11 @@ class MissionController:
                 agent = self._agent(gate, writes=True, tests=True, steps=max_steps)
                 try:
                     saved_session = agent.store.load(session)
+                    if previous_pending_repair and (
+                            saved_session is None or bool(saved_session["pending"])):
+                        self.journal.set_state(ident, "repair_uncertain", verdict=verdict)
+                        event("needs_review", "Resolve the previous started repair tool before resuming")
+                        break
                     task_text = (
                         "A requested acceptance check failed. Diagnose, modify only "
                         "authorized workspace files, and retry permitted checks. "
@@ -462,9 +472,13 @@ class MissionController:
                         + json.dumps(verdict, ensure_ascii=False)[:8000])
                     answer = (agent.run(session, None, resume=True) if saved_session
                               else agent.run(session, task_text))
-                    if answer.startswith(("UNCERTAIN", "PAUSED:")):
+                    if answer.startswith("UNCERTAIN"):
+                        self.journal.set_state(ident, "repair_uncertain", verdict=verdict)
+                        event("needs_review", "Repair tool side effect needs manual resolution")
+                        break
+                    if answer.startswith("PAUSED:"):
                         self.journal.set_state(ident, "needs_review", verdict=verdict)
-                        event("needs_review", "Repair has an uncertain or paused tool call")
+                        event("needs_review", "Repair step budget exhausted")
                         break
                 except Exception as exc:
                     self.journal.set_state(ident, "needs_review", verdict=verdict)
