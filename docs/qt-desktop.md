@@ -1,6 +1,6 @@
-# ironasu Studio v1.8.0 — standalone PySide6 / Qt6 desktop UI
+# ironasu Studio v1.9.0 — standalone PySide6 / Qt6 desktop UI
 
-Version 1.8 makes the **PySide6/Qt6 native desktop app** the default for
+Version 1.9 makes the **PySide6/Qt6 native desktop app** the default for
 `ironasu-studio` and `ironasu-desktop`. No Chrome, Edge, embedded WebView,
 local HTTP UI server, CDN, or Tk widgets are used by the Qt entrypoint.
 
@@ -98,6 +98,14 @@ QT_QPA_PLATFORM=offscreen python -m ironasu.qt_desktop --smoke-gui qt-smoke.json
 ```
 
 The smoke diagnostic writes JSON without contacting a model server.
+
+## Git worktree isolated parallel missions (v1.9)
+
+The Mission tab has an opt-in Git worktree switch, up to 16 separate editors,
+independent baseline/candidate verification and a separate explicit integration
+approval button. It is off by default, and both write and test permissions
+must be approved. Tests are **not** OS-sandboxed.
+See [isolated missions](isolated-missions.md).
 
 ## Mission Controller
 

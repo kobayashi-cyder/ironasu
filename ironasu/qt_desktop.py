@@ -27,7 +27,7 @@ from .native_models import NativeModelManager
 from .runtime import ManagedGGUFRuntime, RuntimeBackendMux
 from .studio import configure, parser as studio_parser
 
-VERSION = "1.8.0"
+VERSION = "1.9.0"
 
 # Kept import-light: --help and --self-test can be invoked on a system without
 # Qt installed. Qt is imported inside build_ui()/main() only.
@@ -730,6 +730,14 @@ def build_ui():
             row.addWidget(self.mission_tests)
             row.addStretch()
             fl.addLayout(row)
+            self.mission_isolated = QCheckBox(
+                "隔離Git worktreeで並列編集（検証後に手動統合）")
+            self.mission_isolated.setChecked(False)
+            fl.addWidget(self.mission_isolated)
+            fl.addWidget(label(
+                "Gitリポジトリが必要です。テストはOS隔離されません。"
+                "並列編集は各worktreeに保存され、元のブランチへは自動反映しません。",
+                kind="caption", wrap=True))
             verification = row_layout()
             verification.addWidget(label("成功判定に使う検証", kind="caption"))
             self.mission_verification = QComboBox()
@@ -759,6 +767,13 @@ def build_ui():
             actions.addWidget(self.mission_stop)
             actions.addStretch()
             fl.addLayout(actions)
+            merge = row_layout()
+            self.mission_approve = button(
+                "検証済み候補を元ブランチへ統合", self._mission_approve)
+            merge.addWidget(self.mission_approve)
+            merge.addWidget(label("明示承認・HEAD不変・作業ツリーがクリーンな場合のみ",
+                                  kind="caption", wrap=True), 1)
+            fl.addLayout(merge)
 
             results, rl = box("02 · 実行ログ・検証結果・復旧")
             vertical.addWidget(results)
@@ -845,6 +860,10 @@ def build_ui():
                 return
             permits_writes = self.mission_writes.isChecked()
             permits_tests = self.mission_tests.isChecked()
+            isolation = self.mission_isolated.isChecked()
+            if isolation and not (permits_writes and permits_tests):
+                self._error("隔離並列編集にはファイル変更とテスト実行の両方の許可が必要です。")
+                return
             if permits_writes or permits_tests:
                 accepted = QMessageBox.question(
                     self, "権限の確認",
@@ -906,6 +925,7 @@ def build_ui():
                     max_repairs=repairs, allow_writes=permits_writes,
                     allow_tests=permits_tests, checks=checks,
                     accept_files=artifact_paths, cancel=stop,
+                    isolated_worktrees=isolation,
                     progress=lambda e: self.bridge.mission_progress.emit(e))
             self._run(work, self._mission_done, self._mission_failed)
 
@@ -922,9 +942,15 @@ def build_ui():
             self.mission_start.setEnabled(True)
             self.mission_resume.setEnabled(True)
             self.mission_stop.setEnabled(False)
+            summary = ("統合済み" if report.state == "integrated" else
+                       "検証済み候補・未統合" if report.state == "verified_isolated" else
+                       "検証成功" if report.verified else "未検証／要対応")
             self.mission_status.setText(
-                ("検証成功" if report.verified else "未検証／要対応") +
-                f" · {report.state} · 修復{report.repairs}回")
+                summary + f" · {report.state} · 修復{report.repairs}回")
+            if report.isolation:
+                self.mission_output.appendPlainText(
+                    "候補Commit: " + str(report.isolation.get("candidate") or "—")
+                    + "\n元ブランチは変更されていません（統合前）。")
             self.mission_output.appendPlainText(
                 "\n【検証結果】\n" + report.reason + "\n" +
                 "\n".join(f"{t['task_id']}: {t['state']} {t['error'][:140]}"
@@ -939,6 +965,44 @@ def build_ui():
             self.mission_resume.setEnabled(True)
             self.mission_stop.setEnabled(False)
             self._error(error)
+
+        def _mission_approve(self):
+            if self.mission_busy:
+                self._error("任務実行中は統合できません。")
+                return
+            ident = self.mission_id.text().strip()
+            folder = Path(self.mission_workspace.text()).expanduser()
+            if not ident or not folder.is_dir():
+                self._error("統合する任務IDと作業フォルダーを確認してください。")
+                return
+            approval = QMessageBox.question(
+                self, "Git変更を統合",
+                "検証済みGit worktree候補を、現在チェックアウト中のブランチへ"
+                "fast-forwardで反映します。作業ツリーがクリーンでHEADが"
+                "任務開始時と同じ場合に限ります。\n\n"
+                "この操作はGit履歴とファイルを書き換えます。承認しますか？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if approval != QMessageBox.StandardButton.Yes:
+                return
+            self.mission_approve.setEnabled(False)
+            def run_approval():
+                from .worktree_mission import IsolatedMission
+                controller = MissionController(
+                    folder, endpoint=self.mux.endpoint().get("url")
+                    or "http://127.0.0.1:1234/v1",
+                    model=self.model_combo.currentText() or "unknown")
+                return IsolatedMission(controller).approve(ident)
+            def done(data):
+                self.mission_approve.setEnabled(True)
+                self.mission_status.setText("Git統合済み: " + ident)
+                self.mission_output.appendPlainText(
+                    "\n【Git統合承認済み】\n" + str(data.get("isolation", {}).get("candidate")))
+                self._mission_refresh()
+            def fail(error):
+                self.mission_approve.setEnabled(True)
+                self._error(error)
+            self._run(run_approval, done, fail)
 
         def _mission_stop(self):
             self.mission_cancel.set()
@@ -1601,6 +1665,7 @@ def main(argv: list[str] | None = None) -> int:
             "model_management": window.native_tree.columnCount() == 2,
             "mission_controller": not window.mission_writes.isChecked() and not window.mission_tests.isChecked(),
             "mission_scrollable": window.mission_form_scroll is not None,
+            "mission_isolation_default_off": not window.mission_isolated.isChecked(),
             "mission_goal_height": window.mission_goal.height(),
             "splitter_panels": window.main_splitter.count(),
             "browser_required": False,

@@ -1,7 +1,19 @@
-# ironasu v1.8 Mission Controller
+# ironasu v1.9 Mission Controller
 
 The fourth Qt6 tab, **ミッション**, is a durable, bounded local coding
 agent workflow. It does not embed a browser or run a general computer agent.
+
+## v1.9: isolated parallel editing (opt-in)
+
+A new **Git worktree isolation** option lets 1–16 agents edit independent
+worktrees in parallel while a separate candidate worktree is verified against
+the baseline. The checked-out branch remains unchanged until explicit
+fast-forward approval. Both write and test permissions must be enabled,
+and trusted Git repository roots are required.
+
+This is **Git working-tree isolation, not an operating-system sandbox**.
+Details, CLI flags, recovery limits and approval conditions are in
+[Isolated Git missions](isolated-missions.md).
 
 ## Workflow
 
