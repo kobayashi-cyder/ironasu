@@ -54,10 +54,13 @@ jobs:
           architecture: x64
       - name: Install build tools
         run: python -m pip install -e ".[desktop]" pyinstaller
+      - name: Build a deterministic Windows app icon
+        run: python scripts/create_icon.py dist/ironasu.ico
       - name: Build standalone PySide6 Qt6 desktop (bundled Python and Qt)
         run: >-
           python -m PyInstaller --noconfirm --clean --windowed --onedir
           --name ironasu-studio --collect-data ironasu.web
+          --icon dist/ironasu.ico --add-data "dist/ironasu.ico;."
           --exclude-module tkinter
           scripts/ironasu_qt_entry.py
       - name: Smoke-test native window (no browser, no model server)
