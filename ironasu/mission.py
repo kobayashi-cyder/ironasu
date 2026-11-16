@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from hashlib import sha256
 import json
 import os
@@ -201,6 +201,7 @@ class MissionReport:
     repairs: int
     verified: bool
     reason: str
+    isolation: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self):
         return asdict(self)
@@ -268,9 +269,10 @@ class MissionController:
         self.backend_factory = backend_factory
         self.journal = MissionJournal(self.workspace)
 
-    def _agent(self, gate, *, writes=False, tests=False, steps=12):
+    def _agent(self, gate, *, writes=False, tests=False, steps=12,
+               workspace: Path | None = None):
         settings = Settings(
-            workspace=self.workspace, endpoint=self.endpoint, model=self.model,
+            workspace=workspace or self.workspace, endpoint=self.endpoint, model=self.model,
             api_key=self.api_key, allow_writes=writes, allow_tests=tests,
             max_steps=steps)
         agent = Harness(settings)
@@ -305,11 +307,30 @@ class MissionController:
     def report(self, ident: str) -> MissionReport:
         row = self.journal.mission(ident)
         verdict = json.loads(row["verdict"])
+        isolation: dict[str, Any] = {}
+        with self.journal.db() as db:
+            exists = db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='mission_isolation'").fetchone()
+            if exists:
+                db.row_factory = sqlite3.Row
+                entry = db.execute(
+                    "SELECT * FROM mission_isolation WHERE mission_id=?", (ident,)
+                ).fetchone()
+                if entry is not None:
+                    data = dict(entry)
+                    isolation = {
+                        "base": data["base"], "candidate": data["candidate"],
+                        "state": data["state"], "baseline": json.loads(data["baseline"]),
+                        "verification": json.loads(data["last_verdict"]),
+                        "worktrees": str(self.workspace / ".ironasu" / "worktrees" / ident),
+                    }
         return MissionReport(
             ident, row["state"], row["goal"], tuple(self.journal.tasks(ident)),
             tuple(json.loads(row["plan"])), tuple(verdict.get("checks", [])),
             tuple(verdict.get("artifacts", [])), row["attempts"],
-            row["state"] == "verified", verdict.get("reason", ""))
+            row["state"] in ("verified", "verified_isolated", "integrated"),
+            verdict.get("reason", ""), isolation)
 
     def run(self, *, goal: str | None = None, mission_id: str | None = None,
             plan: Any = None, checks: Iterable[str] = ("compileall", "git_diff_check"),
@@ -317,7 +338,29 @@ class MissionController:
             model_slots: int = 2, max_steps: int = 12, max_repairs: int = 2,
             allow_writes: bool = False, allow_tests: bool = False,
             cancel: Event | None = None, progress: Callable[[dict], None] | None = None,
-            resume: bool = False, auto_plan: bool = True) -> MissionReport:
+            resume: bool = False, auto_plan: bool = True,
+            isolated_worktrees: bool = False) -> MissionReport:
+        if isolated_worktrees:
+            from .worktree_mission import IsolatedMission
+            return IsolatedMission(self).run(
+                goal=goal, mission_id=mission_id, plan=plan,
+                checks=tuple(checks), accept_files=tuple(accept_files),
+                workers=workers, model_slots=model_slots,
+                max_steps=max_steps, max_repairs=max_repairs,
+                allow_writes=allow_writes, allow_tests=allow_tests,
+                cancel=cancel, progress=progress, resume=resume,
+                auto_plan=auto_plan)
+        if resume and mission_id:
+            with self.journal.db() as db:
+                table = db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name='mission_isolation'").fetchone()
+                if table and db.execute(
+                    "SELECT 1 FROM mission_isolation WHERE mission_id=?",
+                    (mission_id,)).fetchone():
+                    raise ValueError(
+                        "This mission uses isolated worktrees; resume with "
+                        "--isolated-worktrees to avoid editing the original workspace")
         if type(workers) is not int or not 1 <= workers <= 16:
             raise ValueError("workers must be 1..16")
         if type(model_slots) is not int or not 1 <= model_slots <= 16:
@@ -528,11 +571,22 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-steps", type=int, default=12)
     p.add_argument("--max-repairs", type=int, default=2)
     p.add_argument("--no-auto-plan", action="store_true")
+    p.add_argument("--isolated-worktrees", action="store_true",
+                   help="Opt-in parallel Git worktree editing; no automatic main merge")
+    p.add_argument("--approve-integration", action="store_true",
+                   help="Explicitly fast-forward the checked-out branch to a verified candidate")
     a = p.parse_args(argv)
     try:
         controller = MissionController(
             a.workspace, endpoint=a.endpoint, model=a.model,
             api_key=os.getenv("IRONASU_BACKEND_KEY", ""))
+        if a.approve_integration:
+            if not a.mission_id:
+                p.error("--approve-integration requires --mission-id")
+            from .worktree_mission import IsolatedMission
+            result = IsolatedMission(controller).approve(a.mission_id)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
         if a.inspect:
             if not a.mission_id:
                 p.error("--inspect requires --mission-id")
@@ -552,6 +606,7 @@ def main(argv: list[str] | None = None) -> int:
             accept_files=a.accept_file, max_steps=a.max_steps,
             max_repairs=a.max_repairs, allow_writes=a.allow_writes,
             allow_tests=a.allow_tests, auto_plan=not a.no_auto_plan,
+            isolated_worktrees=a.isolated_worktrees,
             progress=lambda e: print(f"[{e['kind']}] {e['detail']}", file=sys.stderr))
         print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2))
         return 0 if report.verified else 2

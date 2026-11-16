@@ -1,5 +1,7 @@
 # ironasu
 
+**v1.9.0 isolated development missions:** Opt-in concurrent Git worktree editing (up to 16 agents) with dependency-aware commits, separate baseline/candidate verification, explicit conflict reporting, durable SQLite metadata and manual fast-forward approval. The checked-out branch is **not** edited by a successful isolated run. Worktree isolation is **not an OS sandbox**; run only in trusted repositories. See [isolated mission guide](docs/isolated-missions.md).
+
 **v1.8.0 — Durable Mission Controller:** GitHub-style software missions can now
 create a bounded task DAG, run up to 16 read-only agent sessions (2 model calls
 by default), persist progress in SQLite, verify approved project checks, and
