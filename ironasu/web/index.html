@@ -115,7 +115,10 @@
         <div class="stat"><span>待機中</span><strong id="stat-waiting">—</strong></div>
         <div class="stat"><span>キャッシュ</span><strong id="stat-cache">—</strong></div>
         <div class="stat"><span>上流呼び出し</span><strong id="stat-calls">—</strong></div>
+        <div class="stat"><span>上流呼び出し回避（実測）</span><strong id="stat-avoided">—</strong></div>
+        <div class="stat"><span>応答再利用率（算出）</span><strong id="stat-reuse-rate">—</strong></div>
       </div>
+      <p class="hint">回避数はキャッシュ／Singleflightで上流呼び出しせず返した応答数です。GPU時間・電力量・FLOPsの削減量は未測定です。</p>
       <div class="health-line"><span>負荷状態</span><strong id="pressure-status">—</strong></div>
       <div class="health-line"><span>接続先</span><code id="backend-provider">自動検出中</code></div>
       <div class="health-line"><span>API</span><code id="backend-url">—</code></div>
