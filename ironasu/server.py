@@ -14,6 +14,7 @@ from .models import ModelManager
 from .native_models import NativeModelManager
 from .runtime import ManagedGGUFRuntime, RuntimeBackendMux
 from .core import HTTPBackend
+from .mobile_api import MobileJobManager
 
 MAX_BODY_BYTES = 2 * 1024 * 1024
 ASSETS = {
@@ -32,7 +33,8 @@ CSP = (
 
 def make_handler(engine: AdaptiveEngine, models: ModelManager | None = None,
                  native: NativeModelManager | None = None,
-                 managed: ManagedGGUFRuntime | None = None):
+                 managed: ManagedGGUFRuntime | None = None,
+                 team_jobs: MobileJobManager | None = None):
     """A handler factory so HTTP integration tests can use fake backends."""
     settings = engine.config
     models = models or ModelManager(settings)
@@ -103,6 +105,16 @@ def make_handler(engine: AdaptiveEngine, models: ModelManager | None = None,
                                          else models.installed(provider)})
                 except InferenceError as exc:
                     self._send(exc.status, {"error": {"message": str(exc)}})
+            elif path == "/ui/agents/jobs":
+                self._send(200, team_jobs.list_jobs() if team_jobs is not None else {"jobs": []})
+            elif path.startswith("/ui/agents/jobs/"):
+                if team_jobs is None:
+                    self._send(501, {"error": {"message": "Agent job manager unavailable"}})
+                else:
+                    try:
+                        self._send(200, team_jobs.get(path[len("/ui/agents/jobs/"):]))
+                    except InferenceError as exc:
+                        self._send(exc.status, {"error": {"message": str(exc)}})
             elif path == "/ui/status":
                 discovered = engine.upstream_models()
                 fast, quality = engine.effective_models(discovered)
@@ -157,7 +169,8 @@ def make_handler(engine: AdaptiveEngine, models: ModelManager | None = None,
             path = urlsplit(self.path).path
             if path not in ("/v1/chat/completions", "/ui/models/download",
                              "/ui/models/load", "/ui/models/native/cancel",
-                             "/ui/models/native/remove", "/ui/runtime/start", "/ui/runtime/stop"):
+                             "/ui/models/native/remove", "/ui/runtime/start", "/ui/runtime/stop",
+                             "/ui/agents/start"):
                 self._send(404, {"error": {"message": "not found"}})
                 return
             if not self._same_origin():
@@ -167,6 +180,11 @@ def make_handler(engine: AdaptiveEngine, models: ModelManager | None = None,
                 request = self._read_json(
                     cap=8192 if path.startswith(("/ui/models/", "/ui/runtime/")) else MAX_BODY_BYTES
                 )
+                if path == "/ui/agents/start":
+                    if team_jobs is None:
+                        raise InferenceError("Agent job manager unavailable", 501)
+                    self._send(202, team_jobs.start(request))
+                    return
                 if path == "/ui/runtime/start":
                     if managed is None:
                         raise InferenceError("Managed runtime unavailable", 501)
@@ -262,9 +280,10 @@ def serve(config: Config | None = None, *, backend=None, open_browser: bool = Fa
     managed = ManagedGGUFRuntime(native)
     upstream = backend if backend is not None else HTTPBackend(settings)
     engine = AdaptiveEngine(settings, RuntimeBackendMux(upstream, managed))
+    team_jobs = MobileJobManager(settings)
     server = ThreadingHTTPServer(
         (settings.listen_host, settings.listen_port),
-        make_handler(engine, native=native, managed=managed),
+        make_handler(engine, native=native, managed=managed, team_jobs=team_jobs),
     )
     url = f"http://{settings.listen_host}:{server.server_port}/ui"
     print(f"ironasu ready at {url}", flush=True)
@@ -278,5 +297,6 @@ def serve(config: Config | None = None, *, backend=None, open_browser: bool = Fa
     except KeyboardInterrupt:
         pass
     finally:
+        team_jobs.close()
         managed.stop()
         server.server_close()
