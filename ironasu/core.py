@@ -13,6 +13,7 @@ from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from .context import select_code
+from .budget import RequestBudget
 
 
 class InferenceError(Exception):
@@ -185,6 +186,12 @@ class Metrics:
         self.singleflight_hits = 0
         self.overloads = 0
         self.errors = 0
+        self.policy_requests = 0
+        self.policy_quality_guards = 0
+        self.policy_queue_limits = 0
+        self.policy_cache_bypasses = 0
+        self.reused_reported_output_tokens = 0
+        self.reuse_usage_unknown = 0
         self.active_requests = 0
         self.waiting_requests = 0
         self.peak_active_requests = 0
@@ -220,6 +227,31 @@ class Metrics:
             self.peak_active_requests = max(self.peak_active_requests, self.active_requests)
             self.peak_waiting_requests = max(self.peak_waiting_requests, self.waiting_requests)
 
+    def record_policy(self, budget: RequestBudget) -> None:
+        if not budget.explicit:
+            return
+        with self._lock:
+            self.policy_requests += 1
+            self.policy_quality_guards += int(budget.preserve_auto_quality)
+            self.policy_queue_limits += int(budget.max_queue_ms is not None)
+            self.policy_cache_bypasses += int(not budget.allow_cache)
+
+    def record_reuse(self, source: str, result: dict[str, Any]) -> None:
+        """Record only successful cache / Singleflight response reuse."""
+        if source not in ("cache", "singleflight"):
+            raise ValueError("invalid reuse source")
+        usage = result.get("usage") if isinstance(result, dict) else None
+        tokens = usage.get("completion_tokens") if isinstance(usage, dict) else None
+        with self._lock:
+            if source == "cache":
+                self.cache_hits += 1
+            else:
+                self.singleflight_hits += 1
+            if type(tokens) is int and tokens >= 0:
+                self.reused_reported_output_tokens += tokens
+            else:
+                self.reuse_usage_unknown += 1
+
     def bump(self, name: str) -> None:
         with self._lock:
             setattr(self, name, getattr(self, name) + 1)
@@ -230,6 +262,10 @@ class Metrics:
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
+            upstream_attempts = sum(self.calls.values())
+            upstream_successes = max(0, upstream_attempts - self.errors)
+            avoided = self.cache_hits + self.singleflight_hits
+            served = upstream_successes + avoided
             return {
                 "backend_calls": dict(self.calls),
                 "cache_hits": self.cache_hits,
@@ -243,6 +279,31 @@ class Metrics:
                 "pressure": self.pressure,
                 "latency_seconds": {k: list(v) for k, v in self.latency.items()},
                 "queue_wait_seconds": list(self.queue_wait),
+                "execution_budget": {
+                    "explicit_plans": self.policy_requests,
+                    "quality_guard_requested": self.policy_quality_guards,
+                    "queue_limit_requested": self.policy_queue_limits,
+                    "cache_bypass_requested": self.policy_cache_bypasses,
+                },
+                "efficiency": {
+                    "observed": {
+                        "avoided_upstream_requests": avoided,
+                        "cache_responses": self.cache_hits,
+                        "singleflight_responses": self.singleflight_hits,
+                        "successful_upstream_responses": upstream_successes,
+                        "reused_reported_output_tokens": (
+                            self.reused_reported_output_tokens if self.reuse_usage_unknown == 0 else None
+                        ),
+                        "reuse_missing_token_usage": self.reuse_usage_unknown,
+                    },
+                    "derived": {
+                        "response_reuse_fraction": avoided / served if served else None,
+                    },
+                    "unmeasured": [
+                        "GPU compute avoided", "GPU memory saved", "FLOPs saved",
+                        "energy saved", "counterfactual latency saved",
+                    ],
+                },
             }
 
 
@@ -289,7 +350,12 @@ class AdaptiveEngine:
             raise InferenceError("messages must be a nonempty list of objects", 400)
         if payload.get("stream"):
             raise InferenceError("streaming is not yet supported", 400)
-        route, model = self._select_model(payload, messages)
+        try:
+            budget = RequestBudget.from_request(payload)
+        except ValueError as exc:
+            raise InferenceError(str(exc), 400) from exc
+        route, model = self._select_model(payload, messages, budget)
+        self.metrics.record_policy(budget)
         request = {k: v for k, v in payload.items() if not k.startswith("x_ironasu_")}
         request["model"] = model
         request.pop("stream", None)
@@ -316,7 +382,8 @@ class AdaptiveEngine:
                 self._context_stats["selected_source_chars"] += selected.selected_chars
         # No caching for tools, nondeterministic requests, or explicit opt-out.
         cacheable = (
-            payload.get("x_ironasu_cache", True) is True
+            budget.allow_cache
+            and payload.get("x_ironasu_cache", True) is True
             and payload.get("temperature", 1) == 0
             and not payload.get("tools")
             and not payload.get("tool_choice")
@@ -325,8 +392,8 @@ class AdaptiveEngine:
         if key:
             cached = self.cache.get(key)
             if cached is not None:
-                self.metrics.bump("cache_hits")
-                return self._annotate(cached, route, "cache", context_report)
+                self.metrics.record_reuse("cache", cached)
+                return self._annotate(cached, route, "cache", context_report, budget)
             with self._flight_lock:
                 if key in self._inflight:
                     event, holder = self._inflight[key]
@@ -338,22 +405,29 @@ class AdaptiveEngine:
             if follower:
                 # Followers also occupy a waiting thread; enforce the same cap
                 # used for upstream queueing to prevent unbounded singleflight waiters.
+                wait_budget = self.config.request_timeout_s + self.config.queue_timeout_s
+                if budget.max_queue_ms is not None:
+                    wait_budget = min(wait_budget, budget.max_queue_ms / 1000.0)
+                if wait_budget == 0 and not event.is_set():
+                    self.metrics.bump("overloads")
+                    raise InferenceError("singleflight wait budget exhausted", 503)
                 self._reserve_waiter()
                 try:
-                    self.metrics.bump("singleflight_hits")
-                    if not event.wait(self.config.request_timeout_s + self.config.queue_timeout_s):
+                    if not event.wait(wait_budget):
                         raise InferenceError("identical upstream request timed out", 504)
                     if "error" in holder:
                         raise holder["error"]
-                    return self._annotate(holder["result"], route, "singleflight", context_report)
+                    result = holder["result"]
+                    self.metrics.record_reuse("singleflight", result)
+                    return self._annotate(result, route, "singleflight", context_report, budget)
                 finally:
                     self._release_waiter()
         try:
-            result = self._invoke(request, route)
+            result = self._invoke(request, route, queue_timeout_s=budget.queue_timeout_s(self.config.queue_timeout_s))
             if key:
                 self.cache.put(key, result)
                 holder["result"] = result
-            return self._annotate(result, route, "upstream", context_report)
+            return self._annotate(result, route, "upstream", context_report, budget)
         except Exception as exc:
             if key:
                 holder["error"] = exc
@@ -365,7 +439,8 @@ class AdaptiveEngine:
                     event.set()
 
     def _select_model(
-        self, payload: dict[str, Any], messages: list[dict[str, Any]]
+        self, payload: dict[str, Any], messages: list[dict[str, Any]],
+        budget: RequestBudget | None = None,
     ) -> tuple[str, str]:
         mode = payload.get("x_ironasu_mode", "auto")
         if mode not in ("auto", "fast", "quality"):
@@ -381,7 +456,9 @@ class AdaptiveEngine:
                 mode = "fast"
             elif payload.get("model") == "ironasu-quality":
                 mode = "quality"
-        route = _route(messages, mode, self.metrics.is_pressured())
+        pressure = self.metrics.is_pressured()
+        route = _route(messages, mode,
+                       budget.pressure_for_routing(pressure) if budget else pressure)
         chosen = self.config.fast_model if route == "fast" else self.config.quality_model
         if self.config.auto_models and not chosen:
             catalog = self.upstream_models()
@@ -407,7 +484,12 @@ class AdaptiveEngine:
             raise InferenceError("stream must be true", 400)
         if "x_ironasu_files" in payload:
             raise InferenceError("streaming with code-context retrieval is not supported", 400)
-        route, model = self._select_model(payload, messages)
+        try:
+            budget = RequestBudget.from_request(payload)
+        except ValueError as exc:
+            raise InferenceError(str(exc), 400) from exc
+        route, model = self._select_model(payload, messages, budget)
+        self.metrics.record_policy(budget)
         request = {k: v for k, v in payload.items() if not k.startswith("x_ironasu_")}
         request["model"] = model
         request["stream"] = True
@@ -416,9 +498,13 @@ class AdaptiveEngine:
         queued = time.perf_counter()
         acquired = self._slots.acquire(blocking=False)
         if not acquired:
+            wait_budget = budget.queue_timeout_s(self.config.queue_timeout_s)
+            if wait_budget == 0:
+                self.metrics.bump("overloads")
+                raise InferenceError("queue wait budget exhausted", 503)
             self._reserve_waiter()
             try:
-                acquired = self._slots.acquire(timeout=self.config.queue_timeout_s)
+                acquired = self._slots.acquire(timeout=wait_budget)
             finally:
                 self._release_waiter()
         wait_s = time.perf_counter() - queued
@@ -462,14 +548,19 @@ class AdaptiveEngine:
         self.metrics.adjust_admission(waiting_delta=-1)
         self._waiters.release()
 
-    def _invoke(self, request: dict[str, Any], route: str) -> dict[str, Any]:
+    def _invoke(self, request: dict[str, Any], route: str, *,
+                queue_timeout_s: float | None = None) -> dict[str, Any]:
         queued = time.perf_counter()
+        timeout = self.config.queue_timeout_s if queue_timeout_s is None else queue_timeout_s
         # Do not consume queue capacity when an execution slot is already free.
         acquired = self._slots.acquire(blocking=False)
         if not acquired:
+            if timeout == 0:
+                self.metrics.bump("overloads")
+                raise InferenceError("queue wait budget exhausted", 503)
             self._reserve_waiter()
             try:
-                acquired = self._slots.acquire(timeout=self.config.queue_timeout_s)
+                acquired = self._slots.acquire(timeout=timeout)
             finally:
                 self._release_waiter()
         wait_s = time.perf_counter() - queued
@@ -490,10 +581,16 @@ class AdaptiveEngine:
             self._slots.release()
 
     @staticmethod
-    def _annotate(result: dict[str, Any], route: str, source: str, context: dict | None = None) -> dict[str, Any]:
+    def _annotate(result: dict[str, Any], route: str, source: str,
+                  context: dict | None = None, budget: RequestBudget | None = None) -> dict[str, Any]:
         metadata = {"route": route, "source": source}
         if context is not None:
             metadata["context_retrieval"] = context
+        if budget and budget.explicit:
+            metadata["execution_budget"] = budget.diagnostic(
+                selected_route=route, observed_pressure=False)
+            # Pressure is intentionally omitted here: the current pressure
+            # may differ from the observation at admission time.
         return {**result, "_ironasu": metadata}
 
     def diagnostic_snapshot(self) -> dict[str, Any]:
