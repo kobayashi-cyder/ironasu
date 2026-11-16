@@ -8,6 +8,7 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher=ironasu contributors
 AppPublisherURL=https://github.com/kobayashi-cyder/ironasu
+SetupIconFile=..\..\dist\ironasu.ico
 DefaultDirName={localappdata}\Programs\ironasu Studio
 DefaultGroupName=ironasu Studio
 PrivilegesRequired=lowest
