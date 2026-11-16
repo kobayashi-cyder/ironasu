@@ -86,7 +86,7 @@ QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QComboBox:focus,
 QSpinBox:focus, QDoubleSpinBox:focus { border: 1px solid #8ed9b9; }
 QComboBox, QSpinBox, QDoubleSpinBox { min-height: 21px; }
-QComboBox::drop-down { width: 24px; border: none; }
+/* Qt paints the native combobox arrow; do not erase it in QSS. */
 QComboBox QAbstractItemView { background: #182631; color: #f1f9f6;
     border: 1px solid #516b72; selection-background-color: #335849; min-height: 30px; }
 QTabWidget::pane { border: none; }
@@ -1277,7 +1277,14 @@ def main(argv: list[str] | None = None) -> int:
         app.processEvents()
         screenshot = os.environ.get("IRONASU_QT_SCREENSHOT")
         if screenshot:
-            window.grab().save(screenshot, "PNG")
+            root = Path(screenshot)
+            for tab, suffix in ((0, ""), (1, "-models"), (2, "-agents")):
+                window.tabs.setCurrentIndex(tab)
+                app.processEvents()
+                path = root if not suffix else root.with_name(root.stem + suffix + root.suffix)
+                window.grab().save(str(path), "PNG")
+            window.tabs.setCurrentIndex(0)
+            app.processEvents()
         result = {
             "native_window_created": True, "qt6": True,
             "tabs": [window.tabs.tabText(i) for i in range(window.tabs.count())],
