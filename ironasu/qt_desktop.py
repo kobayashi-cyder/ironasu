@@ -723,6 +723,15 @@ def build_ui():
             row.addWidget(self.mission_tests)
             row.addStretch()
             fl.addLayout(row)
+            verification = row_layout()
+            verification.addWidget(label("成功判定に使う検証", kind="caption"))
+            self.mission_verification = QComboBox()
+            self.mission_verification.addItems([
+                "unittest + git diff", "pytest + git diff",
+                "compileall + git diff", "git diff only",
+            ])
+            verification.addWidget(self.mission_verification, 1)
+            fl.addLayout(verification)
             fl.addWidget(label(
                 "既定は読み取り専用。編集許可時は作業領域の競合を防ぐため"
                 "1ワーカーずつ実行します。テストはプロジェクト内のコードを実行します。",
@@ -861,6 +870,13 @@ def build_ui():
                 api_key = self.managed._backend.config.backend_key
             artifact_paths = tuple(x.strip() for x in
                                    self.mission_files.text().split(",") if x.strip())
+            mode = self.mission_verification.currentText()
+            checks = (
+                ("unittest", "git_diff_check") if mode.startswith("unittest") else
+                ("pytest", "git_diff_check") if mode.startswith("pytest") else
+                ("compileall", "git_diff_check") if mode.startswith("compileall") else
+                ("git_diff_check",)
+            )
             self.mission_cancel = Event()
             self.mission_busy = True
             self.mission_id.setText(identifier)
@@ -881,7 +897,7 @@ def build_ui():
                     goal=None if resume else goal, mission_id=identifier,
                     resume=resume, workers=workers, model_slots=slots,
                     max_repairs=repairs, allow_writes=permits_writes,
-                    allow_tests=permits_tests, checks=("compileall", "git_diff_check"),
+                    allow_tests=permits_tests, checks=checks,
                     accept_files=artifact_paths, cancel=stop,
                     progress=lambda e: self.bridge.mission_progress.emit(e))
             self._run(work, self._mission_done, self._mission_failed)
