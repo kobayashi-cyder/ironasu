@@ -109,9 +109,16 @@ class GitWorktrees:
 
     def commit(self, cwd: Path, *, label: str) -> str:
         # The harness journal is always local to the worktree and excluded.
-        self.git(cwd, "add", "--all", "--", ".", ":(exclude).ironasu")
-        paths = self.git(cwd, "diff", "--cached", "--name-only", "-z").split("\x00")
-        paths = [p for p in paths if p]
+        # Avoid passing the private journal directory as a pathspec:
+        # Git errors if .ironasu is gitignored, and could stage private data
+        # if it is not. Enumerate and screen source paths instead.
+        tracked = self.git(cwd, "diff", "--name-only", "-z").split("\x00")
+        untracked = self.git(cwd, "ls-files", "--others", "--exclude-standard",
+                             "-z").split("\x00")
+        pre_staged = self.git(cwd, "diff", "--cached", "--name-only", "-z").split("\x00")
+        paths = list(dict.fromkeys(
+            name for name in (*tracked, *untracked, *pre_staged)
+            if name and Path(name).parts[0] != ".ironasu"))
         if len(paths) > 100:
             raise ValueError("Too many changed files in one task")
         total = 0
@@ -129,6 +136,8 @@ class GitWorktrees:
             total += size
             if size > 2_000_000 or total > 10_000_000:
                 raise ValueError("Task changes exceed the bounded staging budget")
+        if paths:
+            self.git(cwd, "add", "--all", "--", *paths)
         self.git(cwd, "diff", "--cached", "--check")
         if not paths:
             return self.head(cwd)
