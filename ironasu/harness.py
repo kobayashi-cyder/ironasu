@@ -23,6 +23,9 @@ from urllib.parse import urlsplit
 MAX_FILE_BYTES = 128 * 1024
 MAX_TOOL_OUTPUT = 12000
 PRIVATE_PARTS = {".git", ".ironasu", ".ssh", "node_modules", "__pycache__"}
+# Explicitly allow retry only for tools with no persistent side effects.
+# run_checks is intentionally excluded: test suites may mutate the workspace.
+SAFE_REPLAY_TOOLS = frozenset({"list_files", "read_file", "search_text", "recall"})
 SYSTEM = (
     "You are ironasu, a careful coding agent operating in one project workspace. "
     "Inspect code before modifying it. Prefer minimal changes. Run checks when permitted. "
@@ -106,7 +109,7 @@ class OpenAIBackend:
 
 
 class Store:
-    """SQLite journal; every recorded tool start is at-most-once automatically."""
+    """SQLite journal; side-effectful tool starts are at-most-once automatically."""
     def __init__(self, workspace: Path):
         root = workspace / ".ironasu"
         root.mkdir(mode=0o700, exist_ok=True)
@@ -422,14 +425,27 @@ class Harness:
             if row["pending"]:
                 call = row["pending"][0]
                 state = self.store.event(sid, call["id"])
+                tool_name = call["function"]["name"]
+                if state is not None and state[0] == "started" and tool_name in SAFE_REPLAY_TOOLS:
+                    # Only read-only tools may be replayed. Results reflect
+                    # the *current* workspace, not necessarily the pre-crash snapshot.
+                    # Keep the same journal event and finish atomically with the tool message.
+                    try:
+                        args = json.loads(call["function"].get("arguments") or "{}")
+                        output = tools.execute(tool_name, args)
+                    except (ValueError, KeyError, TypeError) as exc:
+                        output = f"TOOL_ERROR {exc}"
+                    self.store.finish(sid, self.settings.workspace, call,
+                                      _clip("REPLAYED_READ_ONLY_AFTER_INTERRUPTION\n" + output))
+                    continue
                 if state is not None:
                     self.store.save(sid, self.settings.workspace, "uncertain", row["messages"], row["pending"])
-                    return (f"UNCERTAIN tool call {call['id']} ({call['function']['name']}). "
+                    return (f"UNCERTAIN tool call {call['id']} ({tool_name}). "
                             "Do not replay automatically. Inspect state, then use --resolve-call and --resolve-result.")
                 self.store.start(sid, call)
                 try:
                     args = json.loads(call["function"].get("arguments") or "{}")
-                    output = tools.execute(call["function"]["name"], args)
+                    output = tools.execute(tool_name, args)
                 except (ValueError, KeyError, TypeError) as exc:
                     output = f"TOOL_ERROR {exc}"
                 self.store.finish(sid, self.settings.workspace, call, _clip(output))
