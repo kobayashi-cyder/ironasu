@@ -212,9 +212,11 @@ def check_acceptance(workspace: Path, kinds: tuple[str, ...],
     artifacts = []
     for name in artifact_paths:
         p = (workspace / name).resolve()
-        if not p.is_relative_to(workspace) or any(part in (".git", ".ironasu", ".ssh") for part in Path(name).parts)
+        if (not p.is_relative_to(workspace)
                 or any(part in (".git", ".ironasu", ".ssh")
-                       for part in p.relative_to(workspace).parts):
+                       for part in Path(name).parts)
+                or any(part in (".git", ".ironasu", ".ssh")
+                       for part in p.relative_to(workspace).parts)):
             raise ValueError("Private/escaping artifact path")
         present = p.is_file()
         digest = (sha256(p.read_bytes()).hexdigest()
