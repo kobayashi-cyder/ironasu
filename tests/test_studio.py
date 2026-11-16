@@ -79,6 +79,9 @@ class ServerCase(unittest.TestCase):
         self.assertIn(b"connect-src 'self'", self.request("/ui")[1]["Content-Security-Policy"].encode())
         self.assertIn("index.html", resources.files("ironasu.web").joinpath("index.html").name)
         self.assertIn(b"fetch(", self.request("/ui/ui.js")[2])
+        self.assertIn(b"stat-avoided", self.request("/ui")[2])
+        self.assertIn(b"stat-reuse-rate", self.request("/ui")[2])
+        self.assertIn(b"x_ironasu_budget", self.request("/ui/ui.js")[2])
 
     def test_models_and_local_backend_status(self):
         status, _, raw = self.request("/v1/models")
@@ -91,6 +94,9 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(status["fast_model"], self.config.fast_model)
         self.assertTrue(status["upstream_available"])
         self.assertIn("active_requests", status["metrics"])
+        self.assertIn("observed", status["metrics"]["efficiency"])
+        self.assertIn("derived", status["metrics"]["efficiency"])
+        self.assertIsNone(status["metrics"]["efficiency"]["derived"]["response_reuse_fraction"])
 
     def test_non_streaming_and_direct_model_selection(self):
         self.request("/v1/chat/completions", {
@@ -116,6 +122,13 @@ class ServerCase(unittest.TestCase):
         self.assertIn(b"data: [DONE]", body)
         self.assertEqual(self.backend.streams[-1]["model"], self.config.quality_model)
         self.assertEqual(self.engine.metrics.snapshot()["active_requests"], 0)
+        code, _, body = self.request("/v1/chat/completions", {
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": True, "x_ironasu_budget": {"max_queue_ms": 0}
+        })
+        self.assertEqual(code, 200)
+        self.assertNotIn("x_ironasu_budget", self.backend.streams[-1])
+        self.assertEqual(self.engine.metrics.snapshot()["execution_budget"]["queue_limit_requested"], 1)
 
     def test_invalid_stream_and_invalid_model_return_json_400(self):
         for payload in [
@@ -123,6 +136,8 @@ class ServerCase(unittest.TestCase):
              "stream": True, "x_ironasu_files": []},
             {"messages": [{"role": "user", "content": "Hi"}],
              "x_ironasu_model": ""},
+            {"messages": [{"role": "user", "content": "Hi"}],
+             "stream": True, "x_ironasu_budget": {"max_gpu_bytes": 1}},
         ]:
             with self.assertRaises(HTTPError) as caught:
                 self.request("/v1/chat/completions", payload)
