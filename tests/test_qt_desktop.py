@@ -31,6 +31,20 @@ class QtDesktopTests(unittest.TestCase):
             self.assertEqual(result["agents_max"], 16)
             self.assertEqual(result["corpus_partitions"], [4, 16])
 
+    def test_offline_windows_icon_generator(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "ironasu.ico"
+            generator = Path(__file__).resolve().parents[1] / "scripts" / "create_icon.py"
+            process = subprocess.run(
+                [sys.executable, str(generator), str(output)],
+                capture_output=True, text=True, timeout=20,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            data = output.read_bytes()
+            self.assertEqual(data[:6], b"\\x00\\x00\\x01\\x00\\x07\\x00")
+            self.assertIn(b"PNG", data)
+            self.assertLess(len(data), 100000)
+
     def test_no_qt_import_at_entrypoint(self):
         code = ("import ironasu.qt_desktop as q; "
                 "print(q.parser().parse_args(['--provider','lmstudio']).provider)")
