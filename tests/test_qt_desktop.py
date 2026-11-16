@@ -70,8 +70,10 @@ class QtDesktopTests(unittest.TestCase):
             self.assertTrue(report["native_window_created"])
             self.assertTrue(report["qt6"])
             self.assertEqual(report["splitter_panels"], 3)
-            self.assertEqual(len(report["tabs"]), 3)
+            self.assertEqual(len(report["tabs"]), 4)
             self.assertIn("エージェント", report["tabs"][2])
+            self.assertIn("ミッション", report["tabs"][3])
+            self.assertTrue(report["mission_controller"])
             self.assertTrue(report["model_management"])
             self.assertFalse(report["browser_required"])
 
