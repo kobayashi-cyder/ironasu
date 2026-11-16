@@ -61,7 +61,7 @@ class GitWorktrees:
         if result.returncode and check:
             raise GitConflict("Git " + args[0] + " failed: " +
                               (result.stderr or result.stdout).strip()[:600])
-        return result.stdout.strip()
+        return result.stdout.rstrip("\r\n")
 
     def clean_main(self) -> None:
         raw = self.git(self.root, "status", "--porcelain", "--untracked-files=all")
@@ -381,41 +381,60 @@ class IsolatedMission:
             else:
                 stage = git.checkout("candidate", base)
             current = git.head(stage)
-            delta = git.delta(base, current)
-            if not delta["file_count"]:
-                self.journal.set_state(ident, "unverified")
-                event("unverified", "No source change to review")
-                return self.controller.report(ident)
-            # The diff is checked against the original Git baseline,
-            # not the clean index in a committed worktree.
-            try:
-                git.git(stage, "diff", "--check", base, current)
-            except GitConflict as exc:
-                self.journal.set_state(ident, "unverified")
-                event("patch_failed", str(exc)[:400])
-                return self.controller.report(ident)
-            candidate = check_acceptance(stage, checks, accept_files,
-                                         allowed=True, stop=stop)
-            verdict = {"passed": candidate["passed"], "reason": candidate["reason"],
-                       "checks": candidate["checks"], "artifacts": candidate["artifacts"],
-                       "baseline": baseline, "delta": delta,
-                       "candidate": candidate}
-            self.save(ident, candidate=current, last=verdict)
-            self.journal.set_state(ident, "verifying", verdict=verdict)
-            if candidate["passed"]:
-                self.save(ident, state="verified_isolated")
-                self.journal.set_state(ident, "verified_isolated", verdict=verdict)
-                event("verified_isolated", "Passing candidate: " + current[:12] +
-                      "; explicit approval required to integrate")
-                return self.controller.report(ident)
+            resume_repair = meta["state"] in (
+                "repairing_stage", "repair_paused_stage", "repair_uncertain_stage")
+            if resume_repair:
+                # The repair worktree may contain incomplete/uncommitted edits.
+                # Never validate dirty files and label an earlier commit as
+                # passing. First resume the exact harness journal session.
+                verdict = json.loads(meta["last_verdict"])
+                if not verdict:
+                    raise RuntimeError("Interrupted repair has no stored verifier evidence")
+            else:
+                # Only committed content is eligible for verification.
+                dirty = [line for line in git.git(
+                    stage, "status", "--porcelain", "--untracked-files=all).splitlines()
+                    if not line[3:].replace("\\", "/").startswith(".ironasu/")]
+                if dirty:
+                    self.journal.set_state(ident, "needs_review")
+                    event("needs_review", "Candidate contains uncommitted changes")
+                    return self.controller.report(ident)
+                delta = git.delta(base, current)
+                if not delta["file_count"]:
+                    self.journal.set_state(ident, "unverified")
+                    event("unverified", "No source change to review")
+                    return self.controller.report(ident)
+                # Check the actual committed patch relative to the original
+                # baseline, not the clean candidate index.
+                try:
+                    git.git(stage, "diff", "--check", base, current)
+                except GitConflict as exc:
+                    self.journal.set_state(ident, "unverified")
+                    event("patch_failed", str(exc)[:400])
+                    return self.controller.report(ident)
+                candidate = check_acceptance(stage, checks, accept_files,
+                                             allowed=True, stop=stop)
+                verdict = {"passed": candidate["passed"], "reason": candidate["reason"],
+                           "checks": candidate["checks"], "artifacts": candidate["artifacts"],
+                           "baseline": baseline, "delta": delta,
+                           "candidate": candidate}
+                self.save(ident, candidate=current, last=verdict)
+                self.journal.set_state(ident, "verifying", verdict=verdict)
+                if candidate["passed"]:
+                    self.save(ident, state="verified_isolated")
+                    self.journal.set_state(ident, "verified_isolated", verdict=verdict)
+                    event("verified_isolated", "Passing candidate: " + current[:12] +
+                          "; explicit approval required to integrate")
+                    return self.controller.report(ident)
 
             # Repair only the integration candidate. Failed or uncertain
             # model tools are not replayed automatically by the harness.
             while not stop.is_set():
                 record = self.journal.mission(ident)
                 n = int(record["attempts"])
-                resuming_repair = (record["state"] in
-                                   ("repairing_stage", "repair_paused_stage", "repair_uncertain_stage"))
+                resuming_repair = resume_repair or (record["state"] in
+                    ("repairing_stage", "repair_paused_stage", "repair_uncertain_stage"))
+                resume_repair = False
                 if n >= max_repairs and not resuming_repair:
                     break
                 if not resuming_repair:
@@ -430,6 +449,7 @@ class IsolatedMission:
                     saved = agent.store.load(task_id)
                     if resuming_repair and saved is None:
                         self.journal.set_state(ident, "repair_uncertain_stage", verdict=verdict)
+                        self.save(ident, state="repair_uncertain_stage")
                         break
                     content = ("Repair failed candidate verification in this isolated "
                                "Git worktree. Keep changes minimal. The original Git "
@@ -440,14 +460,22 @@ class IsolatedMission:
                               agent.run(task_id, content))
                     if answer.startswith("UNCERTAIN"):
                         self.journal.set_state(ident, "repair_uncertain_stage", verdict=verdict)
+                        self.save(ident, state="repair_uncertain_stage")
                         break
                     if answer.startswith("PAUSED:"):
                         self.journal.set_state(ident, "repair_paused_stage", verdict=verdict)
+                        self.save(ident, state="repair_paused_stage")
                         break
                     current = git.commit(stage, label="repair-" + str(n))
                 finally:
                     agent.store.conn.close()
                 if not git.delta(base, current)["file_count"]:
+                    break
+                try:
+                    git.git(stage, "diff", "--check", base, current)
+                except GitConflict as exc:
+                    self.journal.set_state(ident, "needs_review", verdict=verdict)
+                    event("patch_failed", str(exc)[:300])
                     break
                 candidate = check_acceptance(stage, checks, accept_files,
                                              allowed=True, stop=stop)
@@ -488,6 +516,11 @@ class IsolatedMission:
                 candidate = meta["candidate"]
                 if not candidate or git.git(self.workspace, "cat-file", "-t", candidate) != "commit":
                     raise RuntimeError("Candidate commit is not available")
+                if git.git(self.workspace, "symbolic-ref", "--quiet", "--short", "HEAD") == "":
+                    raise RuntimeError("Refusing to integrate on detached HEAD")
+                stage = git.checkout("candidate", meta["base"])
+                if git.head(stage) != candidate:
+                    raise RuntimeError("Candidate worktree HEAD differs from verified commit")
                 # Persist risk state first. A crash cannot lead to a silent
                 # second merge. Operator must inspect after interruption.
                 self.save(ident, state="integration_pending")
