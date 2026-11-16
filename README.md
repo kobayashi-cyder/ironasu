@@ -1,5 +1,15 @@
 # ironasu
 
+## Adaptive execution budget + evidence dashboard
+
+**New:** the existing gateway now accepts an optional `x_ironasu_budget`
+object to preserve auto-route quality under pressure, bound per-request
+queue waiting and disable exact-cache reuse when requested. Desktop and
+Web Studio default to pressure-safe auto routing. The native/Web dashboards
+show **measured upstream calls avoided** through successful cache/Singleflight
+reuse and a separately derived reuse ratio; no fictitious GPU/FLOP savings
+are presented. See [budget API, evidence definitions and limits](docs/adaptive-budget.md).
+
 ## v1.6 — independent desktop GUI + 16 corpus agents
 
 **ironasu Studio now opens its own native window rather than a browser.**
