@@ -140,6 +140,60 @@ class MissionTests(unittest.TestCase):
         self.assertEqual(result.state, "needs_review")
         self.assertEqual(result.tasks[0]["state"], "uncertain")
         self.assertFalse((self.root / "result.txt").exists())
+        # A human inspects the workspace and explicitly resolves the
+        # journal event; only then may the mission resume the existing
+        # model session without replaying the started write.
+        repair_journal = Store(self.root)
+        repair_journal.resolve_uncertain(
+            sid, "call1", "Inspected; write did not execute")
+        repair_journal.conn.close()
+        resumed = self.controller.run(
+            mission_id=mission_id, resume=True,
+            allow_writes=False, allow_tests=True)
+        self.assertTrue(resumed.verified, resumed)
+        self.assertEqual(resumed.tasks[0]["state"], "succeeded")
+        self.assertFalse((self.root / "result.txt").exists())
+
+    def test_uncertain_repair_can_resume_same_attempt_after_manual_review(self):
+        from ironasu.harness import SYSTEM, Store
+        from ironasu.team import TeamTask
+        ident = "repair_review"
+        self.controller.journal.create(
+            ident, "Produce result", self.controller.endpoint,
+            self.controller.model, (TeamTask("work", "Inspect"),),
+            ("compileall",), ("result.txt",))
+        self.controller.journal.set_task(
+            ident, "work", "succeeded", "Research completed")
+        self.controller.journal.set_state(
+            ident, "repair_uncertain", attempts=1,
+            verdict={"passed": False, "reason": "Missing result"})
+        store = Store(self.root)
+        call = {"id": "repair_call", "type": "function", "function": {
+            "name": "write_file",
+            "arguments": '{"path":"result.txt","content":"verified deliverable"}'}}
+        sid = "m_" + ident + "_repair_1"
+        store.save(sid, self.root, "ready",
+                   [{"role": "system", "content": SYSTEM},
+                    {"role": "user", "content": "Repair source"},
+                    {"role": "assistant", "content": "", "tool_calls": [call]}],
+                   [call])
+        store.start(sid, call)
+        store.conn.close()
+        first = self.controller.run(
+            mission_id=ident, resume=True,
+            allow_writes=True, allow_tests=True, max_repairs=2)
+        self.assertEqual(first.state, "repair_uncertain")
+        self.assertEqual(first.repairs, 1)
+        self.assertFalse((self.root / "result.txt").exists())
+        store = Store(self.root)
+        store.resolve_uncertain(sid, "repair_call", "Inspected: write did not happen")
+        store.conn.close()
+        second = self.controller.run(
+            mission_id=ident, resume=True,
+            allow_writes=True, allow_tests=True, max_repairs=2)
+        self.assertTrue(second.verified, second)
+        self.assertEqual(second.repairs, 2)
+        self.assertEqual((self.root / "result.txt").read_text(), "verified deliverable")
 
     def test_cancelled_mission_does_no_model_work(self):
         stop = Event()
