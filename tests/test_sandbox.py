@@ -112,7 +112,9 @@ class RealSandboxTests(unittest.TestCase):
             "assert not [line for line in Path('/proc/net/route').read_text().splitlines()[1:] "
             "if line.split()[1]=='00000000']; "
             "Path('source.txt').write_text('changed in container'); "
-            "\nfor p in ['/etc/ironasu-escape','/input/project/source.txt']:\n"
+            "\ntry: os.setuid(0); raise AssertionError(\'identity escalation\')\nexcept PermissionError: pass\n"
+            "try: os.kill(1,0); raise AssertionError(\'watchdog signal permission\')\nexcept PermissionError: pass\n"
+            "for p in ['/etc/ironasu-escape','/input/project/source.txt']:\n"
             " try: Path(p).write_text('bad'); raise AssertionError('write escaped')\n"
             " except OSError: pass\n"
             "assert not os.getenv('OPENAI_API_KEY'); print('isolated')")
@@ -206,3 +208,78 @@ class RealSandboxTests(unittest.TestCase):
                                    stop=Event(), sandbox=self.policy)
         self.assertFalse(verdict["passed"], verdict)
         self.assertIn("trailing whitespace", verdict["checks"][0]["output"])
+
+
+    def test_cpu_quota_limits_the_entire_workload(self):
+        policy = replace(self.policy, cpus=0.25)
+        result = self.command(
+            "import json,time; w=time.monotonic(); c=time.process_time()\n"
+            "while time.monotonic()-w<2: pass\n"
+            "print(json.dumps({'wall':time.monotonic()-w,'cpu':time.process_time()-c}))",
+            policy=policy)
+        self.assertTrue(result.passed, result)
+        metrics = json.loads(result.output.splitlines()[-1])
+        self.assertLess(metrics["cpu"] / metrics["wall"], 0.5)
+
+    def test_waiting_for_aggregate_budget_is_cancellable(self):
+        from threading import Thread
+        outcomes = []
+        thread = Thread(target=lambda: outcomes.append(
+            self.command("import time; time.sleep(2)", timeout=10)))
+        thread.start()
+        self.addCleanup(thread.join, 15)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            active = subprocess.check_output(
+                ["docker", "ps", "-q", "--filter", "name=ironasu-"], text=True)
+            if active.strip():
+                break
+            time.sleep(0.05)
+        self.assertTrue(active.strip())
+        stop = Event()
+        timer = Timer(0.15, stop.set)
+        timer.start()
+        self.addCleanup(timer.join)
+        before = time.monotonic()
+        result = self.command("print('must not start')", stop=stop)
+        self.assertEqual(result.reason, "cancelled", result)
+        self.assertLess(time.monotonic() - before, 1.5)
+        thread.join(timeout=12)
+        self.assertEqual(len(outcomes), 1)
+        self.assertTrue(outcomes[0].passed, outcomes)
+
+    def test_host_crash_keeps_the_container_watchdog_and_recovery(self):
+        from dataclasses import asdict
+        source = ("import json; from pathlib import Path; "
+                  "from ironasu.sandbox import SandboxPolicy,run_sandbox; "
+                  f"policy=SandboxPolicy(**json.loads({json.dumps(asdict(self.policy))!r})); "
+                  f"run_sandbox(['python3','-c','import time; time.sleep(30)'],"
+                  f"cwd=Path({str(self.root)!r}),timeout=4,policy=policy)")
+        process = subprocess.Popen([sys.executable, "-c", source],
+                                   cwd=Path(__file__).resolve().parents[1],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            deadline = time.monotonic() + 5
+            active = ""
+            while time.monotonic() < deadline and process.poll() is None:
+                active = subprocess.check_output(
+                    ["docker", "ps", "-q", "--filter", "name=ironasu-"], text=True).strip()
+                if active:
+                    break
+                time.sleep(0.05)
+            self.assertTrue(active, "Host worker did not launch the container")
+            process.kill()
+            process.wait(timeout=3)
+            deadline = time.monotonic() + 7
+            while time.monotonic() < deadline:
+                active = subprocess.check_output(
+                    ["docker", "ps", "-q", "--filter", "name=ironasu-"], text=True).strip()
+                if not active:
+                    break
+                time.sleep(0.1)
+            self.assertEqual(active, "", "Container outlived its independent watchdog")
+            self.assertTrue(self.command("print('recovered')").passed)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=3)

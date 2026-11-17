@@ -43,11 +43,21 @@ class SandboxPolicy:
 
 
 class Snapshot:
-    def __init__(self, limit):
+    def __init__(self, limit, stop=None, deadline=None):
         self.remaining = limit
         self.count = 0
+        self.scanned = 0
+        self.stop = stop
+        self.deadline = deadline
+
+    def check(self):
+        if self.stop is not None and self.stop.is_set():
+            raise InterruptedError("Snapshot cancelled")
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            raise TimeoutError("Snapshot exceeded the execution deadline")
 
     def copy(self, source: Path, target: Path, *, private=True, depth=0, boundary=None):
+        self.check()
         if depth > 64:
             raise ValueError("Snapshot exceeds directory depth budget")
         boundary = source.absolute() if boundary is None else boundary
@@ -61,15 +71,22 @@ class Snapshot:
             raise ValueError("Snapshot refuses symlinks/reparse points")
         if stat.S_ISDIR(info.st_mode):
             target.mkdir()
-            for entry in sorted(source.iterdir()):
-                name = entry.name.casefold()
-                if private and (name in {".git", ".ironasu", ".ssh", "__pycache__", "node_modules"}
-                                or name.startswith(".env") or name in {"credentials.json", "id_rsa"}
-                                or name.endswith((".key", ".pem"))):
-                    continue
-                if not private and name in {"alternates", "http-alternates"}:
-                    raise ValueError("External Git object stores are not allowed")
-                self.copy(entry, target / entry.name, private=private, depth=depth+1, boundary=boundary)
+            with os.scandir(source) as entries:
+                for raw_entry in entries:
+                    self.check()
+                    self.scanned += 1
+                    if self.scanned > 10000:
+                        raise ValueError("Snapshot exceeds scanned entry budget")
+                    entry = Path(raw_entry.path)
+                    name = entry.name.casefold()
+                    if private and (name in {".git", ".ironasu", ".ssh", "__pycache__", "node_modules",
+                                             ".aws", ".azure", ".docker", ".kube", ".netrc", ".npmrc", ".pypirc", ".gitconfig", ".git-credentials"}
+                                    or name.startswith(".env") or name in {"credentials.json", "id_rsa", "id_ed25519"}
+                                    or name.endswith((".key", ".pem"))):
+                        continue
+                    if not private and name in {"alternates", "http-alternates"}:
+                        raise ValueError("External Git object stores are not allowed")
+                    self.copy(entry, target / entry.name, private=private, depth=depth+1, boundary=boundary)
         elif stat.S_ISREG(info.st_mode):
             if private and info.st_nlink > 1:
                 raise ValueError("Snapshot refuses hard-linked project files")
@@ -82,6 +99,7 @@ class Snapshot:
                 with target.open("xb") as writer:
                     total = 0
                     while True:
+                        self.check()
                         chunk = reader.read(min(1024 * 1024, self.remaining + 1))
                         if not chunk:
                             break
@@ -108,13 +126,20 @@ def _git_snapshot(workspace: Path, target: Path, copier: Snapshot):
     if marker.is_dir():
         state = common = marker.resolve()
     else:
-        text = marker.read_bytes()[:4097]
+        with marker.open("rb") as reader:
+            text = reader.read(4097)
         if len(text) > 4096 or not text.startswith(b"gitdir: "):
             raise ValueError("Invalid Git worktree marker")
         state = (workspace / text[8:].decode("utf-8").strip()).resolve()
         common_marker = state / "commondir"
-        common = ((state / common_marker.read_text().strip()).resolve()
-                  if common_marker.is_file() else state)
+        if common_marker.is_file():
+            with common_marker.open("rb") as reader:
+                value = reader.read(4097)
+            if len(value) > 4096:
+                raise ValueError("Git common-directory marker exceeds budget")
+            common = (state / value.decode("utf-8").strip()).resolve()
+        else:
+            common = state
     allowed = {(p / ".git").resolve() for p in (workspace, *workspace.parents)}
     if common not in allowed or not state.is_relative_to(common):
         raise ValueError("Git metadata is outside the project ancestry")
@@ -131,26 +156,37 @@ def _git_snapshot(workspace: Path, target: Path, copier: Snapshot):
                                    encoding="utf-8")
 
 
-def _docker(args, *, cwd, timeout=15):
-    result = run_command(["docker", *args], cwd=cwd, timeout=timeout, max_output_bytes=32768)
+def _docker(args, *, cwd, timeout=15, stop=None):
+    result = run_command(["docker", *args], cwd=cwd, timeout=timeout,
+                         max_output_bytes=32768, stop=stop)
+    if result.reason == "cancelled":
+        raise InterruptedError("Docker control cancelled")
     if not result.passed:
         raise RuntimeError("Docker control failed: " + result.output[:1000] + " " + result.reason)
     return result.output.strip()
 
 
-def run_sandbox(argv, *, cwd: Path, timeout: float, policy: SandboxPolicy,
+def _run_sandbox(argv, *, cwd: Path, timeout: float, policy: SandboxPolicy,
                 stop=None, max_output_bytes=128 * 1024):
     """Only the sanitised snapshot is mounted. Never fall back to host execution."""
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("Sandbox timeout must be finite and positive")
+    if not argv or len(argv) > 256 or any(not isinstance(arg, str) for arg in argv):
+        raise ValueError("Invalid sandbox argv")
+    if sum(len(arg) for arg in argv) > 20000:
+        raise ValueError("Sandbox command exceeds argument budget")
+    deadline = time.monotonic() + timeout
     if stop is not None and stop.is_set():
         return CommandResult(None, "", "cancelled", 0)
     if not shutil.which("docker"):
         raise RuntimeError("Sandbox requires a local Docker engine with Linux cgroup v2")
     host = os.getenv("DOCKER_HOST", "")
     if not host:
-        host = _docker(["context", "inspect", "--format", "{{.Endpoints.docker.Host}}"], cwd=cwd)
+        host = _docker(["context", "inspect", "--format", "{{.Endpoints.docker.Host}}"],
+                       cwd=cwd, timeout=min(15, timeout), stop=stop)
     if not (host.startswith("unix://") or host.startswith("npipe://")):
         raise RuntimeError("Sandbox refuses a remote Docker daemon")
-    config = json.loads(_docker(["image", "inspect", "--format", "{{json .}}", policy.image], cwd=cwd))
+    config = json.loads(_docker(["image", "inspect", "--format", "{{json .}}", policy.image], cwd=cwd, timeout=min(15, timeout), stop=stop))
     if config.get("Os") != "linux" or config.get("Config", {}).get("Volumes"):
         raise RuntimeError("Sandbox needs a Linux image without declared writable volumes")
     image = config.get("Id", "")
@@ -163,7 +199,8 @@ def run_sandbox(argv, *, cwd: Path, timeout: float, policy: SandboxPolicy,
     managed.mkdir(mode=0o700, exist_ok=True)
     label = "ironasu.owner=" + owner
     # One active sandbox per user also bounds aggregate container/staging budgets.
-    with exclusive_lock(managed / "budget.lock"):
+    with exclusive_lock(managed / "budget.lock", stop=stop,
+                        timeout=max(0.001, deadline-time.monotonic())):
         stale = _docker(["ps", "-aq", "--filter", "label=" + label], cwd=cwd).splitlines()
         for ident in stale:
             if not re.fullmatch(r"[0-9a-f]{12,64}", ident):
@@ -180,7 +217,7 @@ def run_sandbox(argv, *, cwd: Path, timeout: float, policy: SandboxPolicy,
         created = False
         try:
             project = stage / "project"
-            copier = Snapshot(policy.snapshot_mb * 1024 * 1024)
+            copier = Snapshot(policy.snapshot_mb * 1024 * 1024, stop=stop, deadline=deadline)
             copier.copy(cwd.resolve(), project)
             _git_snapshot(cwd.resolve(), project / ".git", copier)
             runner = Path(__file__).with_name("sandbox_worker.py")
@@ -190,11 +227,15 @@ def run_sandbox(argv, *, cwd: Path, timeout: float, policy: SandboxPolicy,
                 raise ValueError("Docker mount paths must not contain commas")
             if stop is not None and stop.is_set():
                 return CommandResult(None, "", "cancelled", 0)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return CommandResult(None, "", "timeout", 0)
             payload = {"argv": ["python3" if arg == sys.executable and i == 0 else arg
                                  for i, arg in enumerate(argv)],
-                       "timeout": timeout, "policy": asdict(policy)}
+                       "timeout": remaining, "policy": asdict(policy)}
             args = ["create", "--name", name, "--label", label, "--pull", "never",
                     "--network", "none", "--read-only", "--user", "0:0",
+                    "--no-healthcheck", "--workdir", "/work",
                     "--cap-drop", "ALL", "--cap-add", "SETUID", "--cap-add", "SETGID",
                     "--cap-add", "KILL", "--security-opt", "no-new-privileges=true",
                     "--memory", str(policy.memory_mb) + "m", "--memory-swap", str(policy.memory_mb) + "m",
@@ -206,9 +247,10 @@ def run_sandbox(argv, *, cwd: Path, timeout: float, policy: SandboxPolicy,
                     "--entrypoint", "python3", image, "-I", "/input/runner.py", json.dumps(payload)]
             # Set before create: a timeout can leave creation outcome uncertain.
             created = True
-            _docker(args, cwd=cwd)
+            _docker(args, cwd=cwd, timeout=min(15, remaining), stop=stop)
+            remaining = max(0.1, deadline-time.monotonic())
             result = run_command(["docker", "start", "--attach", name], cwd=cwd,
-                                 timeout=timeout+5, stop=stop, max_output_bytes=max_output_bytes)
+                                 timeout=remaining+5, stop=stop, max_output_bytes=max_output_bytes)
             status = json.loads(_docker(["inspect", "--format", "{{json .State}}", name], cwd=cwd))
             if result.reason == "exited":
                 if status.get("Running"):
@@ -226,6 +268,17 @@ def run_sandbox(argv, *, cwd: Path, timeout: float, policy: SandboxPolicy,
             finally:
                 if stage.exists():
                     shutil.rmtree(stage)
+
+
+def run_sandbox(argv, *, cwd: Path, timeout: float, policy: SandboxPolicy,
+                stop=None, max_output_bytes=128 * 1024):
+    try:
+        return _run_sandbox(argv, cwd=cwd, timeout=timeout, policy=policy,
+                            stop=stop, max_output_bytes=max_output_bytes)
+    except InterruptedError:
+        return CommandResult(None, "", "cancelled", 0)
+    except TimeoutError:
+        return CommandResult(None, "", "timeout", 0)
 
 
 def add_sandbox_arguments(parser):

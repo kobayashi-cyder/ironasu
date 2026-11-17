@@ -22,7 +22,7 @@ from urllib import error, request
 from urllib.parse import urlsplit
 
 from .execution import ModelCancelled, exclusive_lock, run_command
-from .sandbox import add_sandbox_arguments, policy_from_args, policy_from_environment, run_sandbox
+from .sandbox import SandboxPolicy, add_sandbox_arguments, policy_from_args, policy_from_environment, run_sandbox
 
 MAX_FILE_BYTES = 128 * 1024
 MAX_TOOL_OUTPUT = 12000
@@ -62,7 +62,7 @@ class Settings:
     max_context_chars: int = 48000
     timeout_s: float = 120.0
     cancel: Event | None = field(default=None, repr=False, compare=False)
-    sandbox: Any = field(default_factory=policy_from_environment)
+    sandbox: SandboxPolicy | None = field(default_factory=policy_from_environment)
 
     def __post_init__(self) -> None:
         self.workspace = self.workspace.resolve(strict=True)
@@ -71,6 +71,8 @@ class Settings:
         p = urlsplit(self.endpoint)
         if p.scheme not in ("http", "https") or not p.hostname or p.username or p.password:
             raise ValueError("Endpoint must be an http(s) URL without embedded credentials")
+        if self.sandbox is not None and not isinstance(self.sandbox, SandboxPolicy):
+            raise ValueError("sandbox must be a SandboxPolicy")
         if not math.isfinite(self.timeout_s) or self.timeout_s <= 0:
             raise ValueError("Timeout must be finite and positive")
         if self.max_steps < 1 or self.max_context_chars < 4000:

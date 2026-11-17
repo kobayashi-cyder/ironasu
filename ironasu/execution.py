@@ -18,7 +18,7 @@ from typing import Mapping, Sequence
 
 
 @contextmanager
-def exclusive_lock(path: Path, *, timeout: float = 0):
+def exclusive_lock(path: Path, *, timeout: float = 0, stop: Event | None = None):
     """Never unlink: removing a held lock can split concurrent ownership."""
     if os.name == "nt":
         raw = str(path.absolute())
@@ -35,6 +35,8 @@ def exclusive_lock(path: Path, *, timeout: float = 0):
             fp.flush()
         deadline = time.monotonic() + timeout
         while True:
+            if stop is not None and stop.is_set():
+                raise InterruptedError("Cancelled while waiting for execution budget")
             try:
                 if os.name == "nt":
                     import msvcrt
@@ -46,6 +48,8 @@ def exclusive_lock(path: Path, *, timeout: float = 0):
                 break
             except OSError as exc:
                 if time.monotonic() >= deadline:
+                    if timeout > 0:
+                        raise TimeoutError("Execution admission timed out: " + path.name) from exc
                     raise RuntimeError("Operation already active: " + path.name) from exc
                 time.sleep(0.02)
         try:
