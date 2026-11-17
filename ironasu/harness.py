@@ -15,13 +15,14 @@ import sqlite3
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from threading import Event
 from typing import Any
 from urllib import error, request
 from urllib.parse import urlsplit
 
-from .execution import exclusive_lock, run_command
+from .execution import ModelCancelled, exclusive_lock, run_command
+from .sandbox import add_sandbox_arguments, policy_from_args, policy_from_environment, run_sandbox
 
 MAX_FILE_BYTES = 128 * 1024
 MAX_TOOL_OUTPUT = 12000
@@ -60,6 +61,8 @@ class Settings:
     max_steps: int = 12
     max_context_chars: int = 48000
     timeout_s: float = 120.0
+    cancel: Event | None = field(default=None, repr=False, compare=False)
+    sandbox: Any = field(default_factory=policy_from_environment)
 
     def __post_init__(self) -> None:
         self.workspace = self.workspace.resolve(strict=True)
@@ -83,37 +86,30 @@ class OpenAIBackend:
         self.settings = settings
 
     def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
-        url = self.settings.endpoint.rstrip("/")
-        if not url.endswith("/chat/completions"):
-            url += "/chat/completions"
-        payload = _json({"model": self.settings.model, "messages": messages, "tools": tools,
-                         "tool_choice": "auto", "stream": False}).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
-        if self.settings.api_key:
-            headers["Authorization"] = "Bearer " + self.settings.api_key
-        req = request.Request(url, data=payload, headers=headers, method="POST")
-        for attempt in range(3):
-            try:
-                with request.urlopen(req, timeout=self.settings.timeout_s) as response:
-                    raw = response.read(1024 * 1024 + 1)
-                    if len(raw) > 1024 * 1024:
-                        raise ValueError("Backend response exceeds 1 MiB")
-                    data = json.loads(raw)
-                message = data["choices"][0]["message"]
-                if not isinstance(message, dict):
-                    raise ValueError("message is not an object")
-                return message
-            except error.HTTPError as exc:
-                body = exc.read(1024).decode("utf-8", "replace")
-                if exc.code not in (429, 500, 502, 503, 504) or attempt == 2:
-                    raise ModelError(f"Backend HTTP {exc.code}: {body}") from exc
-            except (error.URLError, TimeoutError) as exc:
-                if attempt == 2:
-                    raise ModelError(f"Backend unavailable: {exc}") from exc
-            except (KeyError, IndexError, ValueError, TypeError) as exc:
-                raise ModelError("Backend returned invalid chat/completions JSON") from exc
-            time.sleep(0.5 * (2 ** attempt))
-        raise AssertionError("unreachable")
+        settings = self.settings
+        payload = _json({
+            "settings": {key: getattr(settings, key) for key in
+                         ("endpoint", "model", "api_key", "timeout_s")},
+            "messages": messages, "tools": tools,
+        }).encode("utf-8")
+        worker = Path(__file__).with_name("model_worker.py")
+        argv = ([sys.executable, "--ironasu-model-worker"] if getattr(sys, "frozen", False)
+                else [sys.executable, "-I", str(worker)])
+        result = run_command(
+            argv, cwd=worker.parent, timeout=settings.timeout_s * 3 + 5,
+            stop=settings.cancel, input_bytes=payload,
+            max_output_bytes=2 * 1024 * 1024, memory_bytes=256 * 1024 * 1024)
+        if result.reason == "cancelled":
+            raise ModelCancelled("Model request cancelled")
+        if not result.passed:
+            raise ModelError("Model worker failed: " + result.reason)
+        try:
+            response = json.loads(result.output)
+            if "error" in response:
+                raise ModelError(response["error"])
+            return response["message"]
+        except (KeyError, ValueError, TypeError) as exc:
+            raise ModelError("Invalid model worker response") from exc
 
 
 class Store:
@@ -142,7 +138,16 @@ class Store:
         self.conn.execute("""CREATE TABLE IF NOT EXISTS notes (
             session_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
             PRIMARY KEY(session_id, key))""")
+        self.conn.execute("CREATE TABLE IF NOT EXISTS session_policies (id TEXT PRIMARY KEY, policy TEXT NOT NULL)")
         self.conn.commit()
+
+    def bind_policy(self, sid, policy):
+        value = _json(asdict(policy) if policy is not None else None)
+        with self.conn:
+            self.conn.execute("INSERT OR IGNORE INTO session_policies VALUES(?,?)", (sid, value))
+            saved = self.conn.execute("SELECT policy FROM session_policies WHERE id=?", (sid,)).fetchone()[0]
+            if saved != value:
+                raise ValueError("Session execution policy changed; use a new session ID")
 
     def session_lock(self, sid: str):
         if not isinstance(sid, str) or not re.fullmatch(r"[a-zA-Z0-9_.-]{1,80}", sid):
@@ -377,8 +382,12 @@ class Tools:
                     "compileall": [sys.executable, "-m", "compileall", "-q", "."],
                     "git_diff_check": ["git", "diff", "--check"],
                 }
-                result = run_command(commands[kind], cwd=self.s.workspace, timeout=60,
-                                     stop=self.cancel)
+                if self.s.sandbox is not None:
+                    result = run_sandbox(commands[kind], cwd=self.s.workspace, timeout=60,
+                                         stop=self.cancel, policy=self.s.sandbox)
+                else:
+                    result = run_command(commands[kind], cwd=self.s.workspace, timeout=60,
+                                         stop=self.cancel)
                 return _clip(f"exit={result.returncode} reason={result.reason}\n{result.output}")
             if name == "remember":
                 if not self.s.allow_writes:
@@ -432,13 +441,20 @@ class Harness:
     def run(self, sid: str, task: str | None, *, resume: bool = False,
             cancel: Event | None = None) -> str:
         with self.store.session_lock(sid):
-            return self._run(sid, task, resume=resume, cancel=cancel)
+            previous = self.settings.cancel
+            self.settings.cancel = cancel
+            try:
+                return self._run(sid, task, resume=resume, cancel=cancel)
+            finally:
+                self.settings.cancel = previous
 
     def _run(self, sid: str, task: str | None, *, resume: bool,
              cancel: Event | None) -> str:
         if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,80}", sid):
             raise ValueError("Session ID must be 1-80 letters, digits, dots, dashes, underscores")
         row = self.store.load(sid)
+        if not (row and resume and row["status"] == "complete" and not row["pending"]):
+            self.store.bind_policy(sid, self.settings.sandbox)
         if row is None:
             if not task or resume:
                 raise ValueError("New sessions require a task (not --resume)")
@@ -502,7 +518,11 @@ class Harness:
             messages = context_window(row["messages"], self.settings.max_context_chars)
             if len(_json(messages)) > self.settings.max_context_chars:
                 raise ModelError("Current task cannot fit the context budget")
-            reply = self.backend.complete(messages, TOOLS)
+            try:
+                reply = self.backend.complete(messages, TOOLS)
+            except ModelCancelled:
+                self.store.save(sid, self.settings.workspace, "paused", row["messages"], [])
+                return "PAUSED: cancelled; use --resume."
             if not isinstance(reply, dict) or reply.get("role", "assistant") != "assistant":
                 raise ModelError("Backend reply must be an assistant object")
             if reply.get("content") is not None and not isinstance(reply["content"], str):
@@ -557,13 +577,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allow-tests", action="store_true")
     parser.add_argument("--max-steps", type=int, default=12)
     parser.add_argument("--max-context-chars", type=int, default=48000)
+    add_sandbox_arguments(parser)
     args = parser.parse_args(argv)
     agent = None
     try:
         s = Settings(workspace=args.workspace, endpoint=args.endpoint, model=args.model,
                      api_key=os.getenv("IRONASU_BACKEND_KEY", ""),
                      allow_writes=args.allow_writes, allow_tests=args.allow_tests,
-                     max_steps=args.max_steps, max_context_chars=args.max_context_chars)
+                     max_steps=args.max_steps, max_context_chars=args.max_context_chars,
+                     sandbox=policy_from_args(args))
         agent = Harness(s)
         if args.resolve_call:
             if args.resolve_result is None:

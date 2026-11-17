@@ -60,7 +60,7 @@ def exclusive_lock(path: Path, *, timeout: float = 0):
 
 class _WindowsJob:
     """A kill-on-close Job Object owns ordinary descendant processes."""
-    def __init__(self):
+    def __init__(self, memory_bytes: int | None = None):
         from ctypes import wintypes as w
 
         class Basic(ctypes.Structure):
@@ -95,6 +95,9 @@ class _WindowsJob:
             raise ctypes.WinError(ctypes.get_last_error())
         limits = Limits()
         limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if memory_bytes is not None:
+            limits.basic.flags |= 0x200  # JOB_OBJECT_LIMIT_JOB_MEMORY
+            limits.job_mem = memory_bytes
         if not self.kernel.SetInformationJobObject(
                 self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
             code = ctypes.get_last_error()
@@ -125,18 +128,26 @@ class CommandResult:
 
 def run_command(argv: Sequence[str], *, cwd: Path, timeout: float,
                 stop: Event | None = None, max_output_bytes: int = 128 * 1024,
-                env: Mapping[str, str] | None = None) -> CommandResult:
+                env: Mapping[str, str] | None = None,
+                input_bytes: bytes | None = None,
+                memory_bytes: int | None = None) -> CommandResult:
     """Drain combined output with bounded retention; stop the owned process tree."""
     if not math.isfinite(timeout) or timeout <= 0 or max_output_bytes < 1:
         raise ValueError("Invalid command timeout/output budget")
+    if input_bytes is not None and len(input_bytes) > 2 * 1024 * 1024:
+        raise ValueError("Command input exceeds 2 MiB")
+    if memory_bytes is not None and memory_bytes < 64 * 1024 * 1024:
+        raise ValueError("Command memory budget is too small")
     if stop is not None and stop.is_set():
         return CommandResult(None, "", "cancelled", 0)
     environment = dict(os.environ if env is None else env)
     for secret in ("IRONASU_BACKEND_KEY", "OPENAI_API_KEY"):
         environment.pop(secret, None)
-    job = _WindowsJob() if os.name == "nt" else None
+    job = _WindowsJob(memory_bytes) if os.name == "nt" else None
     process = None
     reader = None
+    writer = None
+    io_errors = []
     captured = bytearray()
     exceeded = Event()
     reason = "exited"
@@ -154,20 +165,38 @@ def run_command(argv: Sequence[str], *, cwd: Path, timeout: float,
         options = ({"creationflags": subprocess.CREATE_NO_WINDOW}
                    if os.name == "nt" else {"start_new_session": True})
         process = subprocess.Popen(
-            list(argv), cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            list(argv), cwd=cwd,
+            stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, shell=False, env=environment, **options)
         if job is not None:
             job.assign(process)
 
         def drain():
-            while True:
-                chunk = process.stdout.read(4096)
-                if not chunk:
-                    return
-                remaining = max_output_bytes - len(captured)
-                captured.extend(chunk[:remaining])
-                if len(chunk) > remaining:
-                    exceeded.set()
+            try:
+                while True:
+                    chunk = process.stdout.read(4096)
+                    if not chunk:
+                        return
+                    remaining = max_output_bytes - len(captured)
+                    captured.extend(chunk[:remaining])
+                    if len(chunk) > remaining:
+                        exceeded.set()
+            except OSError as exc:
+                io_errors.append(exc)
+
+        def feed():
+            try:
+                process.stdin.write(input_bytes)
+                process.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass  # A cancelled/exited child may close stdin early.
+            finally:
+                process.stdin.close()
+
+        if input_bytes is not None:
+            writer = Thread(target=feed, name="ironasu-command-input", daemon=True)
+            writer.start()
 
         reader = Thread(target=drain, name="ironasu-check-output", daemon=True)
         reader.start()
@@ -175,6 +204,9 @@ def run_command(argv: Sequence[str], *, cwd: Path, timeout: float,
         while True:
             if stop is not None and stop.is_set():
                 reason = "cancelled"
+                break
+            if io_errors:
+                reason = "io_error"
                 break
             if exceeded.is_set():
                 reason = "output_limit"
@@ -191,14 +223,38 @@ def run_command(argv: Sequence[str], *, cwd: Path, timeout: float,
             if process.poll() is None:
                 process.kill()  # Also handles failed job assignment.
             process.wait(timeout=5)
+            if writer is not None:
+                writer.join(timeout=5)
+                if writer.is_alive():
+                    raise RuntimeError("Command input pipe did not close")
             if reader is not None:
                 reader.join(timeout=5)
             if reader is not None and reader.is_alive():
                 raise RuntimeError("Command output pipe did not close after tree termination")
             process.stdout.close()
+    if io_errors:
+        reason = "io_error"
     if reason == "exited" and exceeded.is_set():
         reason = "output_limit"
     output = captured.decode("utf-8", "replace")
     if reason == "output_limit":
         output += "\n[output limit exceeded]"
     return CommandResult(process.returncode, output, reason, len(captured))
+
+
+class ModelCancelled(RuntimeError):
+    """The caller cancelled a pending or in-flight model request."""
+
+
+@contextmanager
+def model_slot(gate, stop):
+    """Do not leave cancellation stuck behind an occupied model slot."""
+    while not gate.acquire(timeout=0.05):
+        if stop is not None and stop.is_set():
+            raise ModelCancelled("Model request cancelled while queued")
+    try:
+        if stop is not None and stop.is_set():
+            raise ModelCancelled("Model request cancelled before dispatch")
+        yield
+    finally:
+        gate.release()

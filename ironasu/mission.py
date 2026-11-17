@@ -23,7 +23,8 @@ from uuid import uuid4
 
 from .harness import Harness, OpenAIBackend, Settings, _clip
 from .team import TeamScheduler, TeamTask
-from .execution import run_command
+from .execution import ModelCancelled, model_slot, run_command
+from .sandbox import add_sandbox_arguments, policy_from_args, policy_from_environment, run_sandbox
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,24}$")
 _CHECKS = {"unittest", "pytest", "compileall", "git_diff_check"}
@@ -86,7 +87,9 @@ class MissionJournal:
                 CREATE TABLE IF NOT EXISTS mission_events (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
                 mission_id TEXT NOT NULL, at REAL NOT NULL,
-                kind TEXT NOT NULL, detail TEXT NOT NULL);""")
+                kind TEXT NOT NULL, detail TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS mission_policies (
+                id TEXT PRIMARY KEY, policy TEXT NOT NULL);""")
 
     @contextmanager
     def db(self):
@@ -108,6 +111,14 @@ class MissionJournal:
             con.executemany(
                 "INSERT INTO mission_tasks(mission_id,task_id,state) VALUES(?,?,?)",
                 [(ident, t.task_id, "pending") for t in tasks])
+
+    def bind_policy(self, ident, policy):
+        value = json.dumps(asdict(policy) if policy is not None else None, sort_keys=True)
+        with self.db() as db:
+            db.execute("INSERT OR IGNORE INTO mission_policies VALUES(?,?)", (ident, value))
+            saved = db.execute("SELECT policy FROM mission_policies WHERE id=?", (ident,)).fetchone()[0]
+            if saved != value:
+                raise ValueError("Mission execution policy changed; use a new mission ID")
 
     def mission(self, ident):
         with self.db() as con:
@@ -210,7 +221,7 @@ class MissionReport:
 
 def check_acceptance(workspace: Path, kinds: tuple[str, ...],
                      artifact_paths: tuple[str, ...], *, allowed: bool,
-                     stop: Event) -> dict[str, Any]:
+                     stop: Event, sandbox=None) -> dict[str, Any]:
     artifacts = []
     for name in artifact_paths:
         p = (workspace / name).resolve()
@@ -242,8 +253,12 @@ def check_acceptance(workspace: Path, kinds: tuple[str, ...],
         for secret in ("IRONASU_BACKEND_KEY", "OPENAI_API_KEY"):
             environment.pop(secret, None)
         try:
-            result = run_command(commands[name], cwd=workspace, timeout=120,
-                                 stop=stop, env=environment)
+            if sandbox is not None:
+                result = run_sandbox(commands[name], cwd=workspace, timeout=120,
+                                     stop=stop, policy=sandbox)
+            else:
+                result = run_command(commands[name], cwd=workspace, timeout=120,
+                                     stop=stop, env=environment)
             results.append({
                 "kind": name, "passed": result.passed,
                 "exit_code": result.returncode, "reason": result.reason,
@@ -265,11 +280,12 @@ def check_acceptance(workspace: Path, kinds: tuple[str, ...],
 class MissionController:
     def __init__(self, workspace: Path, *, endpoint: str, model: str,
                  api_key: str = "",
-                 backend_factory: Callable[[Settings], Any] = OpenAIBackend):
+                 backend_factory: Callable[[Settings], Any] = OpenAIBackend, sandbox=None):
         self.workspace = Path(workspace).expanduser().resolve(strict=True)
         Settings(workspace=self.workspace, endpoint=endpoint, model=model)
         self.endpoint, self.model, self.api_key = endpoint, model, api_key
         self.backend_factory = backend_factory
+        self.sandbox = sandbox if sandbox is not None else policy_from_environment()
         self.journal = MissionJournal(self.workspace)
 
     def _agent(self, gate, *, writes=False, tests=False, steps=12,
@@ -277,19 +293,19 @@ class MissionController:
         settings = Settings(
             workspace=workspace or self.workspace, endpoint=self.endpoint, model=self.model,
             api_key=self.api_key, allow_writes=writes, allow_tests=tests,
-            max_steps=steps)
+            max_steps=steps, sandbox=self.sandbox)
         agent = Harness(settings)
         original = self.backend_factory(settings)
         class GatedBackend:
             def complete(self, messages, tools):
-                with gate:
+                with model_slot(gate, settings.cancel):
                     return original.complete(messages, tools)
         agent.backend = GatedBackend()
         return agent
 
-    def propose(self, goal: str) -> tuple[TeamTask, ...]:
+    def propose(self, goal: str, cancel: Event | None = None) -> tuple[TeamTask, ...]:
         settings = Settings(workspace=self.workspace, endpoint=self.endpoint,
-                            model=self.model, api_key=self.api_key)
+                            model=self.model, api_key=self.api_key, cancel=cancel)
         instructions = (
             "Return only JSON: an object with tasks: an array of 1..8 objects "
             "with task_id, prompt, depends_on (string array), priority (integer). "
@@ -396,7 +412,7 @@ class MissionController:
                 if not isinstance(goal, str) or not goal.strip() or len(goal) > _MAX_GOAL:
                     raise ValueError("New mission requires 1..8000 goal characters")
                 tasks = (parse_plan(plan) if plan is not None
-                         else self.propose(goal) if auto_plan
+                         else self.propose(goal, cancel=stop) if auto_plan
                          else (TeamTask("work", goal),))
                 self.journal.create(ident, goal, self.endpoint, self.model,
                                     tasks, kinds, paths)
@@ -407,6 +423,7 @@ class MissionController:
                 raise ValueError("Mission workspace/model/endpoint mismatch")
             if row["state"] == "verified":
                 return self.report(ident)
+            self.journal.bind_policy(ident, self.sandbox)
             previous_repair_state = row["state"]
             previous_repair = previous_repair_state in (
                 "repairing", "repair_uncertain", "repair_paused")
@@ -474,7 +491,7 @@ class MissionController:
                 return self.report(ident)
             self.journal.set_state(ident, "verifying")
             verdict = check_acceptance(self.workspace, kinds, paths,
-                                       allowed=allow_tests, stop=stop)
+                                       allowed=allow_tests, stop=stop, sandbox=self.sandbox)
             self.journal.set_state(ident, "verifying", verdict=verdict)
             event("verification", verdict["reason"])
             if verdict["passed"]:
@@ -540,7 +557,7 @@ class MissionController:
                 finally:
                     agent.store.conn.close()
                 verdict = check_acceptance(self.workspace, kinds, paths,
-                                           allowed=True, stop=stop)
+                                           allowed=True, stop=stop, sandbox=self.sandbox)
                 self.journal.set_state(ident, "verifying", verdict=verdict)
                 event("verification", verdict["reason"])
                 if verdict["passed"]:
@@ -578,11 +595,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="Opt-in parallel Git worktree editing; no automatic main merge")
     p.add_argument("--approve-integration", action="store_true",
                    help="Explicitly fast-forward the checked-out branch to a verified candidate")
+    add_sandbox_arguments(p)
     a = p.parse_args(argv)
     try:
         controller = MissionController(
             a.workspace, endpoint=a.endpoint, model=a.model,
-            api_key=os.getenv("IRONASU_BACKEND_KEY", ""))
+            api_key=os.getenv("IRONASU_BACKEND_KEY", ""), sandbox=policy_from_args(a))
         if a.approve_integration:
             if not a.mission_id:
                 p.error("--approve-integration requires --mission-id")

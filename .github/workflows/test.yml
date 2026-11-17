@@ -166,6 +166,8 @@ jobs:
       - name: Verify harness and command lifecycle
         shell: pwsh
         run: |
+          python -m unittest discover -s tests -p test_model_worker.py -v
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python -m unittest discover -s tests -p test_execution.py -v
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python -m unittest discover -s tests -p test_harness.py -v
@@ -174,3 +176,24 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python -m unittest discover -s tests -p test_worktree_mission.py -v
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+  sandbox-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build local test image and pin its immutable identity
+        run: |
+          docker build -t ironasu-sandbox-ci -f tests/sandbox.Dockerfile .
+          echo "IRONASU_TEST_SANDBOX_IMAGE=$(docker image inspect --format '{{.Id}}' ironasu-sandbox-ci)" >> "$GITHUB_ENV"
+      - name: Verify real isolation, quotas, cancellation and Git snapshots
+        run: |
+          test -n "$IRONASU_TEST_SANDBOX_IMAGE"
+          python -m unittest discover -s tests -p test_sandbox.py -v
+      - name: Confirm no managed container survives
+        if: always()
+        run: |
+          test -z "$(docker ps -q --filter name=ironasu-)"

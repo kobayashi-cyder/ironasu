@@ -63,8 +63,11 @@ jobs:
           python -m PyInstaller --noconfirm --clean --windowed --onedir
           --name ironasu-studio --collect-data ironasu.web
           --icon dist/ironasu.ico --add-data "dist/ironasu.ico;."
+          --add-data "ironasu/sandbox_worker.py;ironasu"
           --exclude-module tkinter
           scripts/ironasu_qt_entry.py
+      - name: Verify model completion and cancellation in the windowless EXE
+        run: python scripts/check_frozen_worker.py dist/ironasu-studio/ironasu-studio.exe
       - name: Smoke-test native window (no browser, no model server)
         shell: pwsh
         run: |

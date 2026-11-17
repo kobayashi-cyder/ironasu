@@ -17,6 +17,7 @@ from threading import BoundedSemaphore
 from typing import Callable, Iterable
 from uuid import uuid4
 
+from .execution import model_slot
 from .harness import Harness, OpenAIBackend, Settings
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,48}$")
@@ -171,7 +172,7 @@ class ModelSlotGate:
         gate = self
         class GatedBackend:
             def complete(self, messages, tools):
-                with gate._slots:
+                with model_slot(gate._slots, getattr(getattr(backend, "settings", None), "cancel", None)):
                     return backend.complete(messages, tools)
         return GatedBackend()
 

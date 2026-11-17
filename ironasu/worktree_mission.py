@@ -253,7 +253,7 @@ class IsolatedMission:
                 if not isinstance(goal, str) or not goal.strip() or len(goal) > 8000:
                     raise ValueError("Mission goal must be 1..8000 characters")
                 tasks = (parse_plan(plan) if plan is not None else
-                         self.controller.propose(goal) if auto_plan else
+                         self.controller.propose(goal, cancel=stop) if auto_plan else
                          (TeamTask("work", goal),))
                 if any(t.task_id in ("candidate", "baseline") for t in tasks):
                     raise ValueError("Reserved task name in isolated worktree plan")
@@ -276,6 +276,7 @@ class IsolatedMission:
                 raise RuntimeError("An interrupted Git integration needs manual review")
             if meta["state"] in ("verified_isolated", "integrated"):
                 return self.controller.report(ident)
+            self.journal.bind_policy(ident, self.controller.sandbox)
             tasks = parse_plan(json.loads(row["plan"]))
             checks = tuple(json.loads(row["checks"]))
             accept_files = tuple(json.loads(row["artifacts"]))
@@ -288,7 +289,7 @@ class IsolatedMission:
             if not json.loads(meta["baseline"]):
                 baseline_dir = git.checkout("baseline", base)
                 baseline = check_acceptance(
-                    baseline_dir, checks, accept_files, allowed=True, stop=stop)
+                    baseline_dir, checks, accept_files, allowed=True, stop=stop, sandbox=self.controller.sandbox)
                 self.save(ident, baseline=baseline)
                 event("baseline", "Baseline checks passed: " + str(baseline["passed"]))
             else:
@@ -413,7 +414,7 @@ class IsolatedMission:
                     event("patch_failed", str(exc)[:400])
                     return self.controller.report(ident)
                 candidate = check_acceptance(stage, checks, accept_files,
-                                             allowed=True, stop=stop)
+                                             allowed=True, stop=stop, sandbox=self.controller.sandbox)
                 verdict = {"passed": candidate["passed"], "reason": candidate["reason"],
                            "checks": candidate["checks"], "artifacts": candidate["artifacts"],
                            "baseline": baseline, "delta": delta,
@@ -478,7 +479,7 @@ class IsolatedMission:
                     event("patch_failed", str(exc)[:300])
                     break
                 candidate = check_acceptance(stage, checks, accept_files,
-                                             allowed=True, stop=stop)
+                                             allowed=True, stop=stop, sandbox=self.controller.sandbox)
                 verdict = {"passed": candidate["passed"], "reason": candidate["reason"],
                            "checks": candidate["checks"], "artifacts": candidate["artifacts"],
                            "baseline": baseline, "delta": git.delta(base, current),
