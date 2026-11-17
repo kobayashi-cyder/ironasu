@@ -1,5 +1,10 @@
-"""Frozen application entry point. PyInstaller includes Python and bundled UI assets."""
-from ironasu.studio import main
+"""Frozen application entry with a private, windowless HTTP worker."""
+import sys
+
+if "--ironasu-model-worker" in sys.argv[1:2]:
+    from ironasu.model_worker import main
+else:
+    from ironasu.studio import main
 
 if __name__ == "__main__":
     raise SystemExit(main())

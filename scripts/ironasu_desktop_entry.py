@@ -1,5 +1,10 @@
-"""Frozen Windows desktop entry point: native window, no browser."""
-from ironasu.desktop import main
+"""Frozen application entry with a private, windowless HTTP worker."""
+import sys
+
+if "--ironasu-model-worker" in sys.argv[1:2]:
+    from ironasu.model_worker import main
+else:
+    from ironasu.desktop import main
 
 if __name__ == "__main__":
     raise SystemExit(main())
