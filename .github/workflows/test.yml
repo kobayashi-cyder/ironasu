@@ -154,3 +154,23 @@ jobs:
           python -m unittest discover -s tests -p test_kimi.py -v
           python -m unittest discover -s tests -p test_stream_integration.py -v
           python -m unittest discover -s tests -p test_speculative_decode.py -v
+
+  windows-execution:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify harness and command lifecycle
+        shell: pwsh
+        run: |
+          python -m unittest discover -s tests -p test_execution.py -v
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p test_harness.py -v
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p test_mission.py -v
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p test_worktree_mission.py -v
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }

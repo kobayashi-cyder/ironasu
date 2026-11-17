@@ -7,18 +7,21 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from threading import Event
 from typing import Any
 from urllib import error, request
 from urllib.parse import urlsplit
+
+from .execution import exclusive_lock, run_command
 
 MAX_FILE_BYTES = 128 * 1024
 MAX_TOOL_OUTPUT = 12000
@@ -65,6 +68,8 @@ class Settings:
         p = urlsplit(self.endpoint)
         if p.scheme not in ("http", "https") or not p.hostname or p.username or p.password:
             raise ValueError("Endpoint must be an http(s) URL without embedded credentials")
+        if not math.isfinite(self.timeout_s) or self.timeout_s <= 0:
+            raise ValueError("Timeout must be finite and positive")
         if self.max_steps < 1 or self.max_context_chars < 4000:
             raise ValueError("Invalid step/context budget")
 
@@ -90,7 +95,10 @@ class OpenAIBackend:
         for attempt in range(3):
             try:
                 with request.urlopen(req, timeout=self.settings.timeout_s) as response:
-                    data = json.load(response)
+                    raw = response.read(1024 * 1024 + 1)
+                    if len(raw) > 1024 * 1024:
+                        raise ValueError("Backend response exceeds 1 MiB")
+                    data = json.loads(raw)
                 message = data["choices"][0]["message"]
                 if not isinstance(message, dict):
                     raise ValueError("message is not an object")
@@ -113,7 +121,16 @@ class Store:
     def __init__(self, workspace: Path):
         root = workspace / ".ironasu"
         root.mkdir(mode=0o700, exist_ok=True)
+        self.root = root
         self.conn = sqlite3.connect(root / "harness.sqlite", timeout=15)
+        try:
+            with exclusive_lock(root / "harness_init.lock", timeout=15):
+                self._initialize()
+        except BaseException:
+            self.conn.close()
+            raise
+
+    def _initialize(self) -> None:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("""CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY, workspace TEXT NOT NULL, status TEXT NOT NULL,
@@ -126,6 +143,14 @@ class Store:
             session_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
             PRIMARY KEY(session_id, key))""")
         self.conn.commit()
+
+    def session_lock(self, sid: str):
+        if not isinstance(sid, str) or not re.fullmatch(r"[a-zA-Z0-9_.-]{1,80}", sid):
+            raise ValueError("Invalid session ID")
+        return exclusive_lock(self.root / ("session_" + _sha(sid.encode("utf-8")) + ".lock"))
+
+    def close(self) -> None:
+        self.conn.close()
 
     def load(self, sid: str) -> dict[str, Any] | None:
         row = self.conn.execute("SELECT workspace,status,messages,pending FROM sessions WHERE id=?", (sid,)).fetchone()
@@ -169,6 +194,10 @@ class Store:
                               (_json(row["messages"]), _json(row["pending"]), time.time(), sid))
 
     def resolve_uncertain(self, sid: str, call_id: str, result: str) -> None:
+        with self.session_lock(sid):
+            self._resolve_uncertain(sid, call_id, result)
+
+    def _resolve_uncertain(self, sid: str, call_id: str, result: str) -> None:
         row = self.load(sid)
         if row is None or not row["pending"] or row["pending"][0]["id"] != call_id:
             raise ValueError("Call is not the next pending operation")
@@ -214,13 +243,15 @@ TOOLS = [{"type": "function", "function": {
 
 
 class Tools:
-    def __init__(self, settings: Settings, store: Store, sid: str):
+    def __init__(self, settings: Settings, store: Store, sid: str, cancel: Event | None = None):
         self.s = settings
         self.store = store
         self.sid = sid
+        self.cancel = cancel
 
     def path(self, raw: str, allow_missing: bool = False) -> Path:
-        if not isinstance(raw, str) or not raw or Path(raw).is_absolute():
+        if (not isinstance(raw, str) or not raw or Path(raw).is_absolute()
+                or Path(raw).drive):
             raise ValueError("Expected a nonempty workspace-relative path")
         if any(part in PRIVATE_PARTS or part.startswith(".env") or
                part.lower() in ("id_rsa", "credentials.json") or
@@ -229,6 +260,14 @@ class Tools:
         p = (self.s.workspace / raw).resolve(strict=not allow_missing)
         if not p.is_relative_to(self.s.workspace):
             raise PermissionError("Path escapes workspace")
+        # Apply private-path policy to the target of an alias too.
+        for part in p.relative_to(self.s.workspace).parts:
+            if (part.casefold() in {x.casefold() for x in PRIVATE_PARTS}
+                    or part.casefold().startswith(".env")
+                    or part.casefold() in ("id_rsa", "credentials.json")
+                    or part.casefold().endswith((".pem", ".key"))
+                    or (os.name == "nt" and ":" in part)):
+                raise PermissionError("Private or generated paths are inaccessible")
         return p
 
     def _write(self, p: Path, text: str) -> str:
@@ -271,7 +310,8 @@ class Tools:
                 return _json(items)
             if name == "read_file":
                 p = self.path(args["path"])
-                raw = p.read_bytes()
+                with p.open("rb") as fp:
+                    raw = fp.read(MAX_FILE_BYTES + 1)
                 if len(raw) > MAX_FILE_BYTES:
                     raise ValueError("File exceeds 128 KiB")
                 return _clip(_json({"sha256": _sha(raw), "content": raw.decode("utf-8")}))
@@ -337,15 +377,9 @@ class Tools:
                     "compileall": [sys.executable, "-m", "compileall", "-q", "."],
                     "git_diff_check": ["git", "diff", "--check"],
                 }
-                try:
-                    env = os.environ.copy()
-                    for secret in ("IRONASU_BACKEND_KEY", "OPENAI_API_KEY"):
-                        env.pop(secret, None)
-                    done = subprocess.run(commands[kind], cwd=self.s.workspace, capture_output=True,
-                                          text=True, timeout=60, shell=False, env=env)
-                    return _clip(f"exit={done.returncode}\n{done.stdout}\n{done.stderr}")
-                except subprocess.TimeoutExpired:
-                    return "Check timed out after 60 seconds"
+                result = run_command(commands[kind], cwd=self.s.workspace, timeout=60,
+                                     stop=self.cancel)
+                return _clip(f"exit={result.returncode} reason={result.reason}\n{result.output}")
             if name == "remember":
                 if not self.s.allow_writes:
                     raise PermissionError("Notes write denied; rerun with --allow-writes")
@@ -395,7 +429,13 @@ class Harness:
         self.backend = backend if backend is not None else OpenAIBackend(settings)
         self.store = Store(settings.workspace)
 
-    def run(self, sid: str, task: str | None, *, resume: bool = False) -> str:
+    def run(self, sid: str, task: str | None, *, resume: bool = False,
+            cancel: Event | None = None) -> str:
+        with self.store.session_lock(sid):
+            return self._run(sid, task, resume=resume, cancel=cancel)
+
+    def _run(self, sid: str, task: str | None, *, resume: bool,
+             cancel: Event | None) -> str:
         if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,80}", sid):
             raise ValueError("Session ID must be 1-80 letters, digits, dots, dashes, underscores")
         row = self.store.load(sid)
@@ -406,7 +446,12 @@ class Harness:
             self.store.save(sid, self.settings.workspace, "ready", messages, [])
         else:
             if row["workspace"] != str(self.settings.workspace):
-                raise ValueError("Session workspace mismatch")
+                try:
+                    same_workspace = Path(row["workspace"]).samefile(self.settings.workspace)
+                except OSError:
+                    same_workspace = False
+                if not same_workspace:
+                    raise ValueError("Session workspace mismatch")
             if task and resume:
                 raise ValueError("Pass either a new task or --resume")
             if resume and row["status"] == "complete" and not row["pending"]:
@@ -418,8 +463,12 @@ class Harness:
                 self.store.save(sid, self.settings.workspace, "ready", row["messages"], [])
             elif not resume:
                 raise ValueError("Existing session needs a task or --resume")
-        tools = Tools(self.settings, self.store, sid)
+        tools = Tools(self.settings, self.store, sid, cancel)
         for _ in range(self.settings.max_steps):
+            if cancel is not None and cancel.is_set():
+                row = self.store.load(sid)
+                self.store.save(sid, self.settings.workspace, "paused", row["messages"], row["pending"])
+                return "PAUSED: cancelled; use --resume."
             row = self.store.load(sid)
             assert row is not None
             if row["pending"]:
@@ -451,10 +500,20 @@ class Harness:
                 self.store.finish(sid, self.settings.workspace, call, _clip(output))
                 continue
             messages = context_window(row["messages"], self.settings.max_context_chars)
+            if len(_json(messages)) > self.settings.max_context_chars:
+                raise ModelError("Current task cannot fit the context budget")
             reply = self.backend.complete(messages, TOOLS)
-            tool_calls = reply.get("tool_calls") or []
+            if not isinstance(reply, dict) or reply.get("role", "assistant") != "assistant":
+                raise ModelError("Backend reply must be an assistant object")
+            if reply.get("content") is not None and not isinstance(reply["content"], str):
+                raise ModelError("Assistant content must be text or null")
+            tool_calls = reply.get("tool_calls", [])
+            if tool_calls is None:
+                tool_calls = []
             if not isinstance(tool_calls, list):
                 raise ModelError("Tool calls must be an array")
+            if len(tool_calls) > 32 or len(_json(reply)) > 1024 * 1024:
+                raise ModelError("Backend reply exceeds budget")
             assistant: dict[str, Any] = {"role": "assistant", "content": reply.get("content")}
             pending = []
             if tool_calls:
@@ -465,8 +524,10 @@ class Harness:
                     if not isinstance(f.get("name"), str) or not isinstance(f.get("arguments", "{}"), str):
                         raise ModelError("Invalid tool function")
                     cid = call.get("id") or f"synthetic_{len(row['messages'])}_{i}"
-                    if not isinstance(cid, str):
+                    if not isinstance(cid, str) or not cid or len(cid) > 256:
                         raise ModelError("Invalid call ID")
+                    if self.store.event(sid, cid) is not None:
+                        raise ModelError("Tool call ID already used in this session")
                     pending.append({"id": cid, "type": "function", "function":
                                     {"name": f["name"], "arguments": f.get("arguments", "{}")}})
                 if len({x["id"] for x in pending}) != len(pending):
@@ -497,6 +558,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-steps", type=int, default=12)
     parser.add_argument("--max-context-chars", type=int, default=48000)
     args = parser.parse_args(argv)
+    agent = None
     try:
         s = Settings(workspace=args.workspace, endpoint=args.endpoint, model=args.model,
                      api_key=os.getenv("IRONASU_BACKEND_KEY", ""),
@@ -513,6 +575,9 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError, RuntimeError, ModelError) as exc:
         print(f"ironasu: {exc}", file=sys.stderr)
         return 2
+    finally:
+        if agent is not None:
+            agent.store.close()
 
 
 if __name__ == "__main__":

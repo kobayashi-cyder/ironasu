@@ -51,3 +51,6 @@ Started `write_file`, `edit_file`, `remember`, and `run_checks` remain **manual 
 - No bundled model backend, direct integration with the experimental out-of-core GPU offload, streaming tool protocol, or verified speculative decoding
 
 The integrated repository also contains an adaptive inference HTTP proxy. The harness can use that proxy through `--endpoint http://127.0.0.1:8765/v1`, but its tools and SQLite journal are independent of the proxy. The server does not provide GPU-side speculative token verification.
+
+See [execution controls and limits](execution-controls.md) for session exclusion,
+command output bounds, cancellation, descendant cleanup and model response limits.

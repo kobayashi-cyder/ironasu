@@ -328,8 +328,8 @@ class IsolatedMission:
                         return "UNCERTAIN: task journal missing"
                     self.journal.set_task(ident, task.task_id, "running")
                     event("task_started", task.task_id)
-                    answer = (agent.run(sid, None, resume=True) if saved else
-                              agent.run(sid, assigned + "\nMission goal:\n" + row["goal"]))
+                    answer = (agent.run(sid, None, resume=True, cancel=stop) if saved else
+                              agent.run(sid, assigned + "\nMission goal:\n" + row["goal"], cancel=stop))
                     if answer.startswith("UNCERTAIN"):
                         self.journal.set_task(ident, task.task_id, "uncertain", error=answer)
                         return answer
@@ -456,8 +456,8 @@ class IsolatedMission:
                                "working directory must remain untouched.\nMission:\n"
                                + row["goal"] + "\nEvidence:\n" +
                                json.dumps(verdict, ensure_ascii=False)[:6000])
-                    answer = (agent.run(task_id, None, resume=True) if saved else
-                              agent.run(task_id, content))
+                    answer = (agent.run(task_id, None, resume=True, cancel=stop) if saved else
+                              agent.run(task_id, content, cancel=stop))
                     if answer.startswith("UNCERTAIN"):
                         self.journal.set_state(ident, "repair_uncertain_stage", verdict=verdict)
                         self.save(ident, state="repair_uncertain_stage")

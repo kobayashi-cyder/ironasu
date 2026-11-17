@@ -23,6 +23,7 @@ from uuid import uuid4
 
 from .harness import Harness, OpenAIBackend, Settings, _clip
 from .team import TeamScheduler, TeamTask
+from .execution import run_command
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,24}$")
 _CHECKS = {"unittest", "pytest", "compileall", "git_diff_check"}
@@ -241,17 +242,19 @@ def check_acceptance(workspace: Path, kinds: tuple[str, ...],
         for secret in ("IRONASU_BACKEND_KEY", "OPENAI_API_KEY"):
             environment.pop(secret, None)
         try:
-            result = subprocess.run(commands[name], cwd=workspace,
-                                    capture_output=True, text=True, shell=False,
-                                    timeout=120, env=environment)
+            result = run_command(commands[name], cwd=workspace, timeout=120,
+                                 stop=stop, env=environment)
             results.append({
-                "kind": name, "passed": result.returncode == 0,
-                "exit_code": result.returncode,
-                "output": _clip(result.stdout + "\n" + result.stderr, 3000),
+                "kind": name, "passed": result.passed,
+                "exit_code": result.returncode, "reason": result.reason,
+                "output": _clip(result.output, 3000),
             })
         except (OSError, subprocess.TimeoutExpired) as exc:
             results.append({"kind": name, "passed": False, "exit_code": None,
                             "output": f"{type(exc).__name__}: {exc}"[:3000]})
+    if stop.is_set():
+        return {"passed": False, "reason": "cancelled",
+                "checks": results, "artifacts": artifacts}
     passed = bool(kinds or artifact_paths) and all(
         a["exists"] for a in artifacts) and all(c["passed"] for c in results)
     return {"passed": passed, "checks": results, "artifacts": artifacts,
@@ -433,8 +436,8 @@ class MissionController:
                     # replayed. Started writes/tests are never replayed.
                     self.journal.set_task(ident, task.task_id, "running")
                     event("task_started", task.task_id)
-                    answer = (agent.run(session, None, resume=True) if saved else
-                              agent.run(session, assigned + "\n\nMission goal:\n" + row["goal"]))
+                    answer = (agent.run(session, None, resume=True, cancel=stop) if saved else
+                              agent.run(session, assigned + "\n\nMission goal:\n" + row["goal"], cancel=stop))
                     if answer.startswith("UNCERTAIN"):
                         self.journal.set_task(ident, task.task_id, "uncertain", error=answer)
                         event("needs_review", f"{task.task_id}: uncertain tool call")
@@ -520,8 +523,8 @@ class MissionController:
                         "Do not assert success without evidence.\nMission:\n"
                         + row["goal"] + "\nVerification:\n"
                         + json.dumps(verdict, ensure_ascii=False)[:8000])
-                    answer = (agent.run(session, None, resume=True) if saved_session
-                              else agent.run(session, task_text))
+                    answer = (agent.run(session, None, resume=True, cancel=stop) if saved_session
+                              else agent.run(session, task_text, cancel=stop))
                     if answer.startswith("UNCERTAIN"):
                         self.journal.set_state(ident, "repair_uncertain", verdict=verdict)
                         event("needs_review", "Repair tool side effect needs manual resolution")
