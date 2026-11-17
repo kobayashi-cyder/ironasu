@@ -72,6 +72,18 @@ class SandboxPolicyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "policy changed"):
                 journal.bind_policy("mission", None)
 
+    def test_project_supplied_docker_cannot_execute_on_the_host(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            fake = root / "docker"
+            fake.write_text("project controlled")
+            with patch("ironasu.sandbox.shutil.which", return_value=str(fake)), \
+                 patch("ironasu.sandbox.run_command") as command:
+                with self.assertRaisesRegex(RuntimeError, "supplied by the project"):
+                    run_sandbox(["python3", "-c", "pass"], cwd=root,
+                                timeout=1, policy=SandboxPolicy(DUMMY))
+                command.assert_not_called()
+
     def test_requested_sandbox_never_runs_native_checks(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

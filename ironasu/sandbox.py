@@ -156,8 +156,20 @@ def _git_snapshot(workspace: Path, target: Path, copier: Snapshot):
                                    encoding="utf-8")
 
 
+def _docker_executable(cwd):
+    found = shutil.which("docker")
+    if not found:
+        raise RuntimeError("Sandbox requires a local Docker engine with Linux cgroup v2")
+    binary = Path(found).resolve(strict=True)
+    workspace = Path(cwd).resolve()
+    boundaries = [workspace, *(p for p in workspace.parents if (p / ".git").exists())]
+    if any(binary.is_relative_to(root) for root in boundaries):
+        raise RuntimeError("Refusing a Docker executable supplied by the project")
+    return str(binary)
+
+
 def _docker(args, *, cwd, timeout=15, stop=None):
-    result = run_command(["docker", *args], cwd=cwd, timeout=timeout,
+    result = run_command([_docker_executable(cwd), *args], cwd=cwd, timeout=timeout,
                          max_output_bytes=32768, stop=stop)
     if result.reason == "cancelled":
         raise InterruptedError("Docker control cancelled")
@@ -178,8 +190,7 @@ def _run_sandbox(argv, *, cwd: Path, timeout: float, policy: SandboxPolicy,
     deadline = time.monotonic() + timeout
     if stop is not None and stop.is_set():
         return CommandResult(None, "", "cancelled", 0)
-    if not shutil.which("docker"):
-        raise RuntimeError("Sandbox requires a local Docker engine with Linux cgroup v2")
+    docker = _docker_executable(cwd)
     host = os.getenv("DOCKER_HOST", "")
     if not host:
         host = _docker(["context", "inspect", "--format", "{{.Endpoints.docker.Host}}"],
@@ -249,7 +260,7 @@ def _run_sandbox(argv, *, cwd: Path, timeout: float, policy: SandboxPolicy,
             created = True
             _docker(args, cwd=cwd, timeout=min(15, remaining), stop=stop)
             remaining = max(0.1, deadline-time.monotonic())
-            result = run_command(["docker", "start", "--attach", name], cwd=cwd,
+            result = run_command([docker, "start", "--attach", name], cwd=cwd,
                                  timeout=remaining+5, stop=stop, max_output_bytes=max_output_bytes)
             status = json.loads(_docker(["inspect", "--format", "{{json .State}}", name], cwd=cwd))
             if result.reason == "exited":
