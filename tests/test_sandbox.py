@@ -208,6 +208,10 @@ class RealSandboxTests(unittest.TestCase):
                                    stop=Event(), sandbox=self.policy)
         self.assertFalse(verdict["passed"], verdict)
         self.assertIn("trailing whitespace", verdict["checks"][0]["output"])
+        (worktree / "source.txt").write_bytes(b"clean Windows line ending\r\n")
+        verdict = check_acceptance(worktree, ("git_diff_check",), (), allowed=True,
+                                   stop=Event(), sandbox=self.policy)
+        self.assertTrue(verdict["passed"], verdict)
 
 
     def test_cpu_quota_limits_the_entire_workload(self):

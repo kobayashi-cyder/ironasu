@@ -152,7 +152,7 @@ def _git_snapshot(workspace: Path, target: Path, copier: Snapshot):
         source = state / name
         if source.exists():
             copier.copy(source, target / name, private=False)
-    (target / "config").write_text("[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfsmonitor = false\n",
+    (target / "config").write_text("[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfsmonitor = false\n\twhitespace = cr-at-eol\n",
                                    encoding="utf-8")
 
 
